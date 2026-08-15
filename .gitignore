@@ -1,3 +1,6 @@
 node_modules/
 dist/
 .DS_Store
+.tmpcheck/
+scripts/tmp*.ts
+src/**/*.js
