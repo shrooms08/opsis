@@ -32,6 +32,7 @@ import { SPL_TOKEN_PROGRAM_ID } from '../../src/decode/builtin/splToken.js';
 import { SYSTEM_PROGRAM_ID } from '../../src/decode/builtin/systemProgram.js';
 import { anchorDiscriminator } from '../../src/decode/idl/idlDecoder.js';
 import type {
+  IdlField,
   IdlInstruction,
   IdlInstructionAccount,
   IdlStore,
@@ -78,6 +79,19 @@ function storeOf(...idls: readonly LoadedIdl[]): IdlStore {
 
 function account(name: string): IdlInstructionAccount {
   return { kind: 'account', name };
+}
+
+/**
+ * One instruction in the Anchor ≤0.29 layout: no declared `discriminator`, so
+ * the decoder computes it from the name, which is what `anchorPayload` below
+ * builds against.
+ */
+function ix(
+  name: string,
+  args: readonly IdlField[] = [],
+  accounts: readonly IdlInstructionAccount[] = [],
+): IdlInstruction {
+  return { name, discriminator: null, accounts, args };
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +210,7 @@ describe('the IDL rung', () => {
    */
   const COLLIDING_NAME = 'transfer_v119';
   const collidingIdl = idlFor(SPL_TOKEN_PROGRAM_ID, [
-    { name: COLLIDING_NAME, accounts: [], args: [{ name: 'amount', type: 'u64' }] },
+    ix(COLLIDING_NAME, [{ name: 'amount', type: 'u64' }]),
   ]);
   const collidingPayload = anchorPayload(COLLIDING_NAME, le(7n, 8));
 
@@ -234,7 +248,7 @@ describe('the IDL rung', () => {
     // Requirement 11.3: the name and the field are real, and the tail is not
     // claimed to have been understood.
     const idl = idlFor(UNKNOWN_PROGRAM, [
-      { name: 'transfer', accounts: [], args: [{ name: 'amount', type: 'u64' }] },
+      ix('transfer', [{ name: 'amount', type: 'u64' }]),
     ]);
     const registry = createRegistry(storeOf(idl));
 
@@ -285,7 +299,7 @@ describe('the built-in rung', () => {
     // its one instruction's discriminator is not what this payload opens with, so
     // the built-in gets the payload rather than the fallback getting it.
     const idl = idlFor(SYSTEM_PROGRAM_ID, [
-      { name: 'somethingElse', accounts: [], args: [{ name: 'amount', type: 'u64' }] },
+      ix('somethingElse', [{ name: 'amount', type: 'u64' }]),
     ]);
     const registry = createRegistry(storeOf(idl));
 
@@ -331,7 +345,7 @@ describe('the Unknown fallback', () => {
     // lower rung to fall to, and the reason names the IDL rather than claiming
     // nothing was registered.
     const idl = idlFor(UNKNOWN_PROGRAM, [
-      { name: 'somethingElse', accounts: [], args: [] },
+      ix('somethingElse'),
     ]);
     const registry = createRegistry(storeOf(idl));
 
@@ -414,11 +428,7 @@ describe('decodeInstruction', () => {
 
 describe('nameAccounts', () => {
   const namedTransfer = idlFor(SPL_TOKEN_PROGRAM_ID, [
-    {
-      name: 'transfer',
-      accounts: [account('source'), account('destination')],
-      args: [{ name: 'amount', type: 'u64' }],
-    },
+    ix('transfer', [{ name: 'amount', type: 'u64' }], [account('source'), account('destination')]),
   ]);
 
   it('applies the matched instruction names positionally', () => {

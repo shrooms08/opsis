@@ -100,6 +100,9 @@ describe('loadIdlDirectory: loading and indexing', () => {
     expect(idl?.instructions).toEqual([
       {
         name: 'initialize',
+        // The legacy layout declares no discriminator, so the loader surfaces
+        // `null` and `idlDecoder.ts` computes it from the name.
+        discriminator: null,
         accounts: [
           { kind: 'account', name: 'payer' },
           { kind: 'account', name: 'state' },
@@ -245,6 +248,82 @@ describe('loadIdlDirectory: the Anchor 0.30+ layout (Req 18.3, 18.4)', () => {
     expect(store.programIds).toEqual([ADDRESS, OTHER_ADDRESS].sort());
     expect(store.get(ADDRESS)?.path).toBe(join(dir, 'a-legacy.json'));
     expect(store.get(OTHER_ADDRESS)?.path).toBe(join(dir, 'b-modern.json'));
+  });
+});
+
+describe('loadIdlDirectory: instructions[].discriminator (Req 4.1, 18.4)', () => {
+  const DECLARED = [1, 2, 3, 4, 5, 6, 7, 8];
+
+  /** A 0.30-style IDL whose one instruction declares `discriminator`. */
+  function withDiscriminator(discriminator: unknown): Record<string, unknown> {
+    const idl = idl030();
+    idl['instructions'] = [
+      { name: 'initialize', discriminator, accounts: [], args: [{ name: 'amount', type: 'u64' }] },
+    ];
+    return idl;
+  }
+
+  it('surfaces a declared discriminator as eight bytes', async () => {
+    await write('modern.json', withDiscriminator(DECLARED));
+
+    const store = await loadIdlDirectory(dir);
+
+    expect(store.warnings).toEqual([]);
+    expect(store.get(ADDRESS)?.instructions[0]?.discriminator).toEqual(Uint8Array.from(DECLARED));
+  });
+
+  it('reports null, not a computed default, when no discriminator is declared', async () => {
+    // The loader does not compute the fallback: `null` is what tells
+    // `idlDecoder.ts` the program never stated its own wire format.
+    await write('legacy.json', validIdl());
+
+    expect((await loadIdlDirectory(dir)).get(ADDRESS)?.instructions[0]?.discriminator).toBeNull();
+  });
+
+  it.each([
+    [
+      'seven bytes',
+      [1, 2, 3, 4, 5, 6, 7],
+      '"instructions[0].discriminator" must be an array of 8 integers from 0 to 255, found 7; ' +
+        'a discriminator of any other length could never match the 8-byte payload prefix',
+    ],
+    [
+      'nine bytes',
+      [1, 2, 3, 4, 5, 6, 7, 8, 9],
+      '"instructions[0].discriminator" must be an array of 8 integers from 0 to 255, found 9; ' +
+        'a discriminator of any other length could never match the 8-byte payload prefix',
+    ],
+    [
+      'a byte above 255',
+      [1, 2, 3, 4, 5, 6, 7, 256],
+      '"instructions[0].discriminator[7]" must be an integer from 0 to 255, found number',
+    ],
+    [
+      'a non-integer byte',
+      [1, 2, 3, 4, 5, 6, 7, 1.5],
+      '"instructions[0].discriminator[7]" must be an integer from 0 to 255, found number',
+    ],
+    [
+      'a string in place of a byte',
+      [1, 2, 3, 4, 5, 6, 7, 'ff'],
+      '"instructions[0].discriminator[7]" must be an integer from 0 to 255, found string',
+    ],
+    [
+      'a hex string in place of the array',
+      '0x0102030405060708',
+      '"instructions[0].discriminator" must be an array of 8 integers from 0 to 255, found string',
+    ],
+  ])('rejects the whole file when the discriminator is %s', async (_label, discriminator, reason) => {
+    // A wrong-length or malformed discriminator would otherwise load and then
+    // match nothing, which is the silent failure this field was read to prevent.
+    // Rejection is file-level, as it is for every other malformed field.
+    const badPath = await write('broken.json', withDiscriminator(discriminator));
+    await write('good.json', validIdl(OTHER_ADDRESS));
+
+    const store = await loadIdlDirectory(dir);
+
+    expect(store.programIds).toEqual([OTHER_ADDRESS]);
+    expect(store.warnings).toEqual([{ kind: 'file-invalid', path: badPath, reason }]);
   });
 });
 

@@ -19,6 +19,12 @@
  * A float argument is asserted to yield `unsupported` *and* to leave the
  * instruction `partial` even when the payload was consumed to its last byte.
  * That pairing is the whole reason the `unsupported` variant exists (Req 9.3).
+ *
+ * A declared discriminator is asserted both to match *and* to make the computed
+ * one stop matching. Only the second half distinguishes preferring the declared
+ * value from merely accepting it, and preferring it is what keeps an Anchor 0.30+
+ * program that overrode its discriminator from loading cleanly and then
+ * degrading every instruction to `Unknown`.
  */
 
 import bs58 from 'bs58';
@@ -56,7 +62,18 @@ function instruction(
   args: readonly IdlField[] = [],
   accounts: readonly IdlInstructionAccount[] = [],
 ): IdlInstruction {
-  return { name, accounts, args };
+  // No declared discriminator: the Anchor ≤0.29 layout, where the decoder
+  // computes it from the name.
+  return { name, discriminator: null, accounts, args };
+}
+
+/** The same, with the Anchor 0.30+ `discriminator` the IDL declares. */
+function declaring(
+  name: string,
+  discriminator: Uint8Array,
+  args: readonly IdlField[] = [],
+): IdlInstruction {
+  return { name, discriminator, accounts: [], args };
 }
 
 function idlWith(...instructions: readonly IdlInstruction[]): LoadedIdl {
@@ -244,6 +261,92 @@ describe('discriminator matching', () => {
   it('exposes the program ID and source the registry keys it under', () => {
     expect(decoder.programId).toBe(PROGRAM_ID);
     expect(decoder.source).toBe('anchor-idl');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Declared discriminators — the Anchor 0.30+ layout (Req 4.1)
+// ---------------------------------------------------------------------------
+
+describe('declared discriminators take precedence over the computed hash', () => {
+  // Eight bytes that are not sha256("global:initialize")[0..8], so the two
+  // candidate keys for this instruction are unambiguously different.
+  const DECLARED = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+
+  /** A payload opening with exactly these eight bytes. */
+  function payloadOpening(discriminator: Uint8Array, ...args: readonly Uint8Array[]): Uint8Array {
+    return concat(discriminator, ...args);
+  }
+
+  it('matches the declared bytes and not the ones the name would hash to', () => {
+    // The second half is the point. Accepting the declared discriminator while
+    // still matching the computed one would pass any test that only checked the
+    // declared payload decodes, and would leave the silent-degradation bug in
+    // place for a program that overrode its discriminator.
+    const decoder = createIdlDecoder(
+      idlWith(declaring('initialize', DECLARED, [arg('amount', 'u64')])),
+    );
+
+    const declared = decoder.decode(payloadOpening(DECLARED, u64(7n)), []);
+    expect(expectFull(declared)).toEqual({
+      kind: 'full',
+      name: 'initialize',
+      fields: [{ name: 'amount', value: { type: 'u64', value: '7' } }],
+    });
+
+    const computed = decoder.decode(payloadFor('initialize', u64(7n)), []);
+    expect(computed).toEqual({ kind: 'no-match' });
+    expect(decoder.match(payloadFor('initialize', u64(7n)))).toBeNull();
+    expect(toHex(anchorDiscriminator('initialize'))).not.toBe(toHex(DECLARED));
+  });
+
+  it('still matches the computed hash for an instruction declaring no discriminator', () => {
+    // The legacy path. Every Anchor ≤0.29 IDL is this case, so the fallback
+    // cannot be lost.
+    const decoder = createIdlDecoder(idlWith(instruction('initialize', [arg('amount', 'u64')])));
+
+    expect(decoder.match(payloadFor('initialize', u64(7n)))?.name).toBe('initialize');
+    expect(decoder.match(payloadOpening(DECLARED, u64(7n)))).toBeNull();
+  });
+
+  it('keys each instruction independently in an IDL that mixes the two layouts', () => {
+    const decoder = createIdlDecoder(
+      idlWith(
+        declaring('modernIx', DECLARED, [arg('amount', 'u64')]),
+        instruction('legacyIx', [arg('flag', 'bool')]),
+      ),
+    );
+
+    expect(expectFull(decoder.decode(payloadOpening(DECLARED, u64(9n)), []))).toEqual({
+      kind: 'full',
+      name: 'modernIx',
+      fields: [{ name: 'amount', value: { type: 'u64', value: '9' } }],
+    });
+    expect(expectFull(decoder.decode(payloadFor('legacyIx', u8(1)), []))).toEqual({
+      kind: 'full',
+      name: 'legacyIx',
+      fields: [{ name: 'flag', value: { type: 'bool', value: true } }],
+    });
+    // Neither instruction answers for the other's key: `modernIx` is not
+    // reachable by its name's hash, and `legacyIx` is not reachable by the
+    // declared bytes.
+    expect(decoder.match(payloadFor('modernIx'))).toBeNull();
+  });
+
+  it('gives a declared/computed collision to whichever instruction comes first', () => {
+    // A declared discriminator can coincide with another instruction's computed
+    // one. IDL order decides, with no preference for the kind of discriminator.
+    const collision = anchorDiscriminator('initialize');
+
+    const computedFirst = createIdlDecoder(
+      idlWith(instruction('initialize'), declaring('shadow', collision)),
+    );
+    expect(computedFirst.match(payloadFor('initialize'))?.name).toBe('initialize');
+
+    const declaredFirst = createIdlDecoder(
+      idlWith(declaring('shadow', collision), instruction('initialize')),
+    );
+    expect(declaredFirst.match(payloadFor('initialize'))?.name).toBe('shadow');
   });
 });
 

@@ -46,7 +46,18 @@
  *   all three non-optional and no consumer can tell which layout a file used.
  *   The 0.30 grammar changes *inside* `instructions` and `accounts` are not this
  *   module's business — `IdlTypeNode` is `unknown` and `idlDecoder.ts` owns
- *   interpretation.
+ *   interpretation, with one exception.
+ *
+ *   That exception is **`instructions[].discriminator`**, the one 0.30 addition
+ *   this module does read. Anchor ≤0.29 declared no discriminator and left it to
+ *   be computed from the instruction name; Anchor 0.30+ writes the eight bytes
+ *   into the file, and a program is free to override them. The value is surfaced
+ *   on `IdlInstruction` as declared-or-`null` rather than defaulted, because a
+ *   loader that computed the fallback here would hide from `idlDecoder.ts` the
+ *   one thing it has to know: whether the program stated its own wire format or
+ *   left the convention to be inferred. This is not grammar interpretation —
+ *   it is eight literal bytes, and nothing about the type system in `args` is
+ *   involved.
  *
  * **Deviation from tasks.md, agreed with the user and recorded here so it reads
  * as a decision rather than an omission.** tasks.md and design.md both say the
@@ -106,6 +117,27 @@ export type IdlInstructionAccount =
 
 export interface IdlInstruction {
   readonly name: string;
+  /**
+   * The eight discriminator bytes the IDL declared, or `null` when it declared
+   * none (Anchor ≤0.29, where the value is computed from `name` instead).
+   *
+   * `null` and not an eight-byte default. The distinction is the whole point of
+   * the field: `idlDecoder.ts` prefers a declared discriminator over the
+   * computed `sha256("global:" + snake_case(name))` because the IDL is the
+   * program's own statement about its wire format, and a loader that filled in
+   * the hash here would erase the difference between "the program said this" and
+   * "we inferred this from a naming convention the program need not follow".
+   *
+   * `Uint8Array` rather than `readonly number[]` so it is the same type
+   * `anchorDiscriminator` returns, which lets the decoder key its map with one
+   * expression and no per-branch conversion. The array is technically mutable,
+   * which the readonly modifier cannot fix; it costs nothing here because the
+   * decoder reads it once, at construction, into a hex key.
+   *
+   * Always exactly `DISCRIMINATOR_BYTES` (8) long when non-null — see
+   * `validateDiscriminator`.
+   */
+  readonly discriminator: Uint8Array | null;
   readonly accounts: readonly IdlInstructionAccount[];
   readonly args: readonly IdlField[];
 }
@@ -519,13 +551,93 @@ function validateInstruction(entry: unknown, at: string): Checked<IdlInstruction
     return { ok: false, reason: fieldReason(`${at}.name`, 'a string', name) };
   }
 
+  const discriminator = validateDiscriminator(record['discriminator'], `${at}.discriminator`);
+  if (!discriminator.ok) return discriminator;
+
   const accounts = validateInstructionAccounts(record['accounts'], `${at}.accounts`);
   if (!accounts.ok) return accounts;
 
   const args = validateFields(record['args'], `${at}.args`);
   if (!args.ok) return args;
 
-  return { ok: true, value: { name, accounts: accounts.value, args: args.value } };
+  return {
+    ok: true,
+    value: {
+      name,
+      discriminator: discriminator.value,
+      accounts: accounts.value,
+      args: args.value,
+    },
+  };
+}
+
+/**
+ * The discriminator width `idlDecoder.ts` also exports as `DISCRIMINATOR_BYTES`.
+ *
+ * Deliberately a second declaration rather than an import: the dependency
+ * between these two modules runs decoder → loader, and importing a runtime value
+ * from the decoder would reverse it so the loader could not be read, or tested,
+ * without the whole Borsh reader behind it. Eight is a fixed property of the
+ * Anchor wire format, not a tunable, so the two declarations cannot drift into
+ * disagreeing about anything that changes.
+ */
+const DISCRIMINATOR_BYTES = 8;
+
+/**
+ * `instructions[].discriminator`, the one Anchor 0.30 addition inside
+ * `instructions` this module reads (Req 4.1, 18.4).
+ *
+ * **Absent is not an error.** Anchor ≤0.29 declared no discriminator at all, and
+ * the legacy layout is still the common case on disk; `null` means "compute it
+ * from the name", which is what `idlDecoder.ts` does.
+ *
+ * **Present means exactly eight byte-valued integers, or the file is rejected.**
+ * The length check is not pedantry about matching Anchor's emitter. `match`
+ * compares the first eight bytes of a payload against these keys, so a
+ * discriminator of any other length can never equal that prefix: the instruction
+ * would load cleanly and then match nothing, degrading every payload that hit it
+ * to `Unknown` with no diagnostic anywhere. That is precisely the silent failure
+ * a declared discriminator was read in order to prevent, so the wrong length is
+ * refused loudly here, where the reason can name the file and the field, rather
+ * than being discovered as an absence of output later.
+ *
+ * A byte outside 0–255, a non-integer, or a non-number is refused for the same
+ * reason — there is no eight-byte value it could describe.
+ */
+function validateDiscriminator(value: unknown, at: string): Checked<Uint8Array | null> {
+  if (value === undefined) return { ok: true, value: null };
+
+  const expected = `an array of ${DISCRIMINATOR_BYTES} integers from 0 to 255`;
+  if (!Array.isArray(value)) {
+    return { ok: false, reason: fieldReason(at, expected, value) };
+  }
+
+  if (value.length !== DISCRIMINATOR_BYTES) {
+    return {
+      ok: false,
+      reason:
+        `"${at}" must be ${expected}, found ${value.length}; a discriminator of any ` +
+        `other length could never match the ${DISCRIMINATOR_BYTES}-byte payload prefix`,
+    };
+  }
+
+  const bytes = new Uint8Array(DISCRIMINATOR_BYTES);
+  for (const [index, entry] of value.entries()) {
+    if (
+      typeof entry !== 'number' ||
+      !Number.isSafeInteger(entry) ||
+      entry < 0 ||
+      entry > 255
+    ) {
+      return {
+        ok: false,
+        reason: fieldReason(`${at}[${index}]`, 'an integer from 0 to 255', entry),
+      };
+    }
+    bytes[index] = entry;
+  }
+
+  return { ok: true, value: bytes };
 }
 
 /**

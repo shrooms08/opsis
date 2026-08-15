@@ -824,12 +824,10 @@ a coverage table so each of the three is traceable to exactly one task.
   counts: the latter two were never recorded, and `07-unknown-program` is pinned
   like the other five.
 
-  **The four sub-tasks below name five of the six directories.**
-  `07-unknown-program` has no dedicated sub-task, so its `expected.json` has no
-  assigned author even though the task 13.1 pinned list requires the file to
-  exist. That is recorded as an open gap rather than closed by quietly attaching it
-  to one of the four, because which sub-task should own it — or whether it wants a
-  fifth — is a scoping decision, and it must be settled before task 13.1 can pass.
+  **The four sub-tasks below cover all six recorded directories**, so every
+  `expected.json` the task 13.1 pinned list requires has an assigned author. An
+  earlier revision left `07-unknown-program` with no owning sub-task; folding it
+  into 9.3 as a fourth error-resolution case is what closed that gap.
 
   With every recorded fixture pinned, these golden files are the whole of the
   fixture-level coverage and the hand review matters correspondingly more — as does
@@ -872,9 +870,9 @@ a coverage table so each of the three is traceable to exactly one task.
       9.1 on this same file, so nothing is asserted about them twice here
     - _Requirements: 7.5, 7.6, 7.7, 8.1, 14.4, 19.3, 21.1_
 
-  - [ ] 9.3 Author `expected.json` for the three error-resolution cases
-    - **Two of these three invert what an earlier revision of this sub-task
-      claimed, and the third resolves by a different route than it claimed.** That
+  - [ ] 9.3 Author `expected.json` for the four error-resolution cases
+    - **Two of these four invert what an earlier revision of this sub-task
+      claimed, and a third resolves by a different route than it claimed.** That
       revision named `04-anchor-framework-error` and `03-spl-token-error`, neither
       of which was recorded, and described `04` as a positive framework-table
       resolution and `02` as resolving through a local IDL. What actually ships is
@@ -899,18 +897,34 @@ a coverage table so each of the three is traceable to exactly one task.
       **not** borrow the System Program's row for the same number, which is what
       pins namespace selection by table membership using the failing instruction's
       program ID
+    - `07-unknown-program`: a `Custom 7` raised by a program with **no built-in
+      decoder, no error table, and no IDL**, resolving to `unresolved` with
+      reason `not-in-table` at `raw` confidence and no message. This is a
+      different kind of "nothing governs this code" from the other three, and
+      that is why it earns a place here rather than sitting apart: Requirement
+      6.6 is no table governing the code at all — code 7 falls outside every
+      framework band and the failing program has no table of its own — whereas
+      `03-program-table-error` is Requirement 6.10, a table that does govern the
+      code and does not contain it. Both surface as `not-in-table`, and pinning
+      them side by side is what makes the shared reason legible as covering two
+      distinct facts rather than looking like one
+    - The same fixture pins honest degradation on the decode side, since that
+      program has no decoder either: `Unknown`, `raw` confidence, the payload
+      preserved as a `0x`-prefixed hex string, and the run still exiting
+      normally. Requirements 4.3, 11.1, and 11.5
     - **No recorded fixture reaches a positive Anchor framework table resolution.**
       That branch is unpinned in v1. The earlier revision claimed `04` covered it,
       and `04` proves the opposite branch
-    - For all three, pin `failingInstructionIndex` naming the top-level index,
+    - For all four, pin `failingInstructionIndex` naming the top-level index,
       `indexOutOfRange: false`, `failed: true` on exactly that node, and
       `cpiAttribution: null`
-    - Pin the verbatim log array and the top-level compute values for all three
-      cases. The log array is load-bearing in two directions here, which is the
-      reason these three sit together: `02` resolves *out of* its log array, and
-      `04` resolves the way it does precisely because of what its log array does
-      **not** contain
-    - _Requirements: 5.2, 6.1, 6.2, 6.3, 6.8, 8.1, 14.4, 18.2, 21.1_
+    - Pin the verbatim log array and the top-level compute values for all four
+      cases. The log array is load-bearing in two directions here, which is part
+      of the reason these cases sit together: `02` resolves *out of* its log
+      array, and `04` resolves the way it does precisely because of what its log
+      array does **not** contain
+    - _Requirements: 4.3, 5.2, 6.1, 6.2, 6.3, 6.6, 6.8, 8.1, 11.1, 11.5, 14.4,
+      18.2, 21.1_
 
   - [ ] 9.4 Author `expected.json` for the nested-CPI failure case
     - `06-nested-cpi-failure`: a failure whose failing top-level instruction has
@@ -941,8 +955,8 @@ a coverage table so each of the three is traceable to exactly one task.
 - [ ] 10. Checkpoint — the six pinned fixtures are green against real ground truth
   - All six recorded fixtures now compare against a hand-reviewed `expected.json`,
     so the pending count should print as zero. A non-zero count here means a pinned
-    `expected.json` is missing — `07-unknown-program` is the one task 9 leaves
-    unassigned — not that a second tier of recorded-but-unpinned cases exists.
+    `expected.json` task 9 assigned an author was never written, not that a
+    second tier of recorded-but-unpinned cases exists.
     Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 11. Rendering and the process contract
