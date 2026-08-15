@@ -186,7 +186,7 @@ a coverage table so each of the three is traceable to exactly one task.
 
 ## Tasks
 
-- [ ] 1. Project skeleton, core types, and the offline guarantee
+- [x] 1. Project skeleton, core types, and the offline guarantee
 
   - [x] 1.1 Initialize the package, TypeScript, and vitest
     - Create `package.json`: `"type": "module"`, `"engines": { "node": ">=20" }`,
@@ -256,7 +256,7 @@ a coverage table so each of the three is traceable to exactly one task.
       which is why it lands in wave 1
     - _Requirements: 9.4, 10.6, 14.9_
 
-- [ ] 2. Fixture recorder and recorded ground truth
+- [x] 2. Fixture recorder and recorded ground truth
 
   - [x] 2.1 Implement the fixture recorder
     - Create `scripts/recordFixture.ts` with `OutcomeFilter`, `RecordOptions`,
@@ -304,7 +304,7 @@ a coverage table so each of the three is traceable to exactly one task.
       Both RPC methods it calls are read-only
     - _Requirements: 10.2_
 
-  - [ ] 2.2 Record `input.json` and `meta.json` for all nine golden cases
+  - [x] 2.2 Record `input.json` and `meta.json` for all nine golden cases
     - Run the task 2.1 recorder once per case against mainnet and commit the
       results under `tests/golden/<case>/`. No `expected.json` is written here;
       see the bootstrap resolution in the Overview
@@ -357,19 +357,21 @@ a coverage table so each of the three is traceable to exactly one task.
       `undecodedData` holds the unconsumed suffix at `partial` confidence
     - The partial-decode case is recorded but not pinned; see the narrowed
       coverage gap in the Overview
+    - `09-partial-decode` was **not** recorded, so the recorded set is six rather
+      than nine; Requirement 11.3's `partial` variant is unpinned by any fixture
     - Keep each response small — a handful of instructions, chosen for the case
       it proves rather than for size — since Requirement 14.10's 10-second
       budget follows from fixture size
     - _Requirements: 10.2, 14.1_
 
-- [ ] 3. Checkpoint — ground truth is committed
+- [x] 3. Checkpoint — ground truth is committed
   - Confirm all nine directories hold a verbatim `input.json` and a `meta.json`,
     and that the recorder is excluded from the package allowlist. Ensure all
     tests pass, ask the user if questions arise.
 
-- [ ] 4. Pipeline spine: input handling through Analysis assembly
+- [x] 4. Pipeline spine: input handling through Analysis assembly
 
-  - [ ] 4.1 Implement signature validation
+  - [x] 4.1 Implement signature validation
     - Create `src/signature.ts` with `SignatureError` and `validateSignature`
     - Validation is base58 decode followed by a byte-length check of exactly 64.
       It is never a character count: base58 length varies with leading zero
@@ -377,7 +379,7 @@ a coverage table so each of the three is traceable to exactly one task.
       invalid ones
     - _Requirements: 1.1, 1.2, 1.3_
 
-  - [ ] 4.3 Implement configuration resolution
+  - [x] 4.3 Implement configuration resolution
     - Create `src/config.ts` with `ResolvedConfig`, `ConfigError`, and
       `resolveConfig(options, env)`
     - Precedence is `--rpc-url` > `OPSIS_RPC_URL` >
@@ -390,7 +392,7 @@ a coverage table so each of the three is traceable to exactly one task.
     - Pass `idlDir` through from the `--idl-dir` flag
     - _Requirements: 16.1, 16.2, 16.3, 16.4, 16.5, 18.1_
 
-  - [ ] 4.4 Implement the transaction source layer
+  - [x] 4.4 Implement the transaction source layer
     - Create `src/source/index.ts` with `TransactionSource`, `SourceResult`, and
       `SourceError`, plus `RawTransactionResponse` as a structural type over the
       RPC JSON shape rather than a web3.js class, so a fixture file and a live
@@ -416,7 +418,7 @@ a coverage table so each of the three is traceable to exactly one task.
       glob is deliberately broken
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 10.1, 10.3, 10.4, 10.5, 16.6_
 
-  - [ ] 4.5 Implement account key resolution for legacy and v0 messages
+  - [x] 4.5 Implement account key resolution for legacy and v0 messages
     - Create `src/decode/accountKeys.ts` with `EffectiveKeys`,
       `resolveAccountKeys`, and `resolveAccountRef`
     - Ordering is fixed: static keys, then loaded writable, then loaded readonly.
@@ -434,7 +436,7 @@ a coverage table so each of the three is traceable to exactly one task.
     - Emit every address as a base58 string
     - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.14, 19.1, 19.2, 19.3, 19.4, 19.5, 19.6, 19.7_
 
-  - [ ] 4.7 Implement the instruction tree builder
+  - [x] 4.7 Implement the instruction tree builder
     - Create `src/decode/instructionTree.ts` with `buildInstructionTree`
     - Merge `message.instructions` with `meta.innerInstructions`, reconstructing
       parentage from `stackHeight` by attaching each inner instruction to the
@@ -453,7 +455,7 @@ a coverage table so each of the three is traceable to exactly one task.
       true — the instruction is real, only its payload was unreadable
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.6, 3.7, 3.8_
 
-  - [ ] 4.8 Implement the raw decode fallback and hex payload preservation
+  - [x] 4.8 Implement the raw decode fallback and hex payload preservation
     - Create `src/decode/registry.ts` with the `InstructionDecoder` and
       `DecodeOutcome` interfaces and a registry that currently resolves every
       program to the `raw` variant named `Unknown`. Task 6.6 adds the precedence
@@ -467,7 +469,7 @@ a coverage table so each of the three is traceable to exactly one task.
       and carry a lookup failure reason in `errorDetail`
     - _Requirements: 3.5, 4.3, 11.1, 11.5, 11.6, 11.7_
 
-  - [ ] 4.9 Implement Analysis assembly and confidence propagation
+  - [x] 4.9 Implement Analysis assembly and confidence propagation
     - Create `src/analyze/assemble.ts` with `AnalysisInput` and
       `assembleAnalysis`, plus `src/pipeline.ts` composing
       decode → resolve → analyze → assemble as one pure function from a
@@ -498,7 +500,7 @@ a coverage table so each of the three is traceable to exactly one task.
       `TZ` and `LANG`
     - _Requirements: 9.1, 9.2, 9.5, 9.6, 9.7, 11.2, 11.4_
 
-  - [ ] 4.10 Implement the golden harness with pending tolerance
+  - [x] 4.10 Implement the golden harness with pending tolerance
     - Create `tests/golden/harness.ts` and its vitest entry. Scan
       `tests/golden/` for subdirectories, sorted by directory name so discovery
       order is deterministic, parse `input.json` as the RPC response, run the
@@ -521,7 +523,7 @@ a coverage table so each of the three is traceable to exactly one task.
       constant or an indentation change cannot break a golden test
     - _Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 14.8_
 
-  - [ ] 4.11 Implement verbatim log capture and the reusable log scope walker
+  - [x] 4.11 Implement verbatim log capture and the reusable log scope walker
     - Numbered last in this group to avoid shifting existing sub-numbers, but it
       **must land before task 4.9**, which emits the `LogReport`, and before task
       8.4, which consumes `walkLogScopes`. The dependency graph places it
@@ -554,29 +556,29 @@ a coverage table so each of the three is traceable to exactly one task.
       collected lines to nodes
     - _Requirements: 21.1, 21.5, 21.6_
 
-- [ ] 5. Checkpoint — a fixture can become an Analysis
+- [x] 5. Checkpoint — a fixture can become an Analysis
   - The spine now turns `input.json` into an `Analysis` with everything decoding
     as `Unknown`. Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 6. Decoders, IDLs, and error resolution
+- [x] 6. Decoders, IDLs, and error resolution
 
-  - [ ] 6.1 Implement the System Program built-in decoder
+  - [x] 6.1 Implement the System Program built-in decoder
     - Create `src/decode/builtin/systemProgram.ts` for program ID
       `11111111111111111111111111111111`, decoding instruction data into named
       fields with `lamports` values carried as decimal strings
     - _Requirements: 4.2, 4.4_
 
-  - [ ] 6.2 Implement the SPL Token built-in decoder
+  - [x] 6.2 Implement the SPL Token built-in decoder
     - Create `src/decode/builtin/splToken.ts` for program ID
       `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`
     - _Requirements: 4.2, 4.4_
 
-  - [ ] 6.3 Implement the SPL Associated Token Account built-in decoder
+  - [x] 6.3 Implement the SPL Associated Token Account built-in decoder
     - Create `src/decode/builtin/splAssociatedTokenAccount.ts` for program ID
       `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`
     - _Requirements: 4.2, 4.4_
 
-  - [ ] 6.4 Implement the Anchor IDL store
+  - [x] 6.4 Implement the Anchor IDL store
     - Create `src/decode/idl/idlStore.ts` with `IdlStore`, `IdlWarning`, and
       `loadIdlDirectory(dir)`. Load every `*.json` file from the directory and
       index by `metadata.address`
@@ -592,7 +594,7 @@ a coverage table so each of the three is traceable to exactly one task.
       dependency is added
     - _Requirements: 9.6, 18.1, 18.2, 18.3, 18.4, 22.5_
 
-  - [ ] 6.5 Implement the Anchor IDL instruction decoder and account naming
+  - [x] 6.5 Implement the Anchor IDL instruction decoder and account naming
     - Create `src/decode/idl/idlDecoder.ts` matching the 8-byte instruction
       discriminator against the loaded IDL and decoding fields by declared type
     - Map IDL account names onto `AccountRef` positionally. An instruction with
@@ -602,7 +604,7 @@ a coverage table so each of the three is traceable to exactly one task.
       instruction to `partial`. There is no float in `Analysis`
     - _Requirements: 4.1, 7.12, 7.13_
 
-  - [ ] 6.6 Implement the decoder registry precedence ladder
+  - [x] 6.6 Implement the decoder registry precedence ladder
     - Extend `src/decode/registry.ts` with `createRegistry(idls)` resolving in
       exactly this order: the program's Anchor IDL matched by discriminator; then
       a built-in decoder, including when an IDL exists but has no matching
@@ -614,13 +616,13 @@ a coverage table so each of the three is traceable to exactly one task.
       unconsumed suffix in `undecodedData`
     - _Requirements: 4.1, 4.2, 4.3, 4.5, 4.6, 4.7, 11.2, 11.3_
 
-  - [ ]* 6.7 Write unit tests for built-in decoder registration
+  - [x]* 6.7 Write unit tests for built-in decoder registration
     - Assert all three built-in decoders are registered under their exact
       program IDs, since a typo in a program ID would silently degrade every
       affected instruction to `Unknown` without failing anything else
     - _Requirements: 4.4_
 
-  - [ ] 6.8 Implement failing instruction location
+  - [x] 6.8 Implement failing instruction location
     - Create `src/resolve/failure.ts` with `locateFailure`
     - `meta.err` in the form `{ InstructionError: [index, detail] }` carries a
       **top-level** index only. That is a property of the runtime error payload,
@@ -635,13 +637,13 @@ a coverage table so each of the three is traceable to exactly one task.
       Phase 2 because it derives entirely from program logs
     - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
-  - [ ] 6.9 Implement the four error namespace tables
+  - [x] 6.9 Implement the four error namespace tables
     - Create `src/resolve/tables/anchorFramework.ts`, `systemProgram.ts`,
       `splToken.ts`, and `splAssociatedTokenAccount.ts` as plain frozen objects
       with an `ErrorTable` interface exposing `namespace` and `lookup(code)`
     - _Requirements: 6.2, 6.3_
 
-  - [ ] 6.10 Implement the error resolver
+  - [x] 6.10 Implement the error resolver
     - Create `src/resolve/errorResolver.ts` with `resolveError`
     - Resolution order: code ≥ 6000 → the failing program's IDL `errors` array,
       or `unresolved` with `reason: 'no-idl'` when no IDL is loaded for it; code
@@ -660,19 +662,19 @@ a coverage table so each of the three is traceable to exactly one task.
       the variant name verbatim from the RPC response
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8, 6.9, 6.10_
 
-  - [ ]* 6.11 Write unit tests for the error namespace decision table
+  - [x]* 6.11 Write unit tests for the error namespace decision table
     - Cover the case a range test gets wrong: the same low numeric code
       resolving differently depending on which known program failed, and a code
       present in one known program's table but absent from the failing program's
       table resolving as `unresolved`
     - _Requirements: 6.3, 6.8, 6.10_
 
-- [ ] 7. Checkpoint — decode and resolve are complete
+- [x] 7. Checkpoint — decode and resolve are complete
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 8. Analysis layer
+- [x] 8. Analysis layer
 
-  - [ ] 8.1 Implement lamport balance deltas
+  - [x] 8.1 Implement lamport balance deltas
     - Create `src/analyze/balances.ts` zipping `meta.preBalances` with
       `meta.postBalances` by account index. Both present → the `delta` variant
       with `post - pre` computed in `bigint` and narrowed to a decimal string.
@@ -683,7 +685,7 @@ a coverage table so each of the three is traceable to exactly one task.
       nowhere in the analysis layer
     - _Requirements: 7.8, 7.9, 7.10, 7.11_
 
-  - [ ]* 8.2 Write property test for lamport delta exactness
+  - [x]* 8.2 Write property test for lamport delta exactness
     - **Property 25: Lamport deltas are exact across the full u64 range**
       (v1-essential)
     - Implement the `arbLamports` generator over the full `u64` range with extra
@@ -700,7 +702,7 @@ a coverage table so each of the three is traceable to exactly one task.
       central data-representation decision works across the range it was chosen for
     - **Validates: Requirements 7.8, 7.9**
 
-  - [ ] 8.3 Implement SPL token balance deltas
+  - [x] 8.3 Implement SPL token balance deltas
     - Create `src/analyze/tokenBalances.ts` matching pre and post
       `Token_Balance_Entry` values on the composite key
       (`accountIndex`, `mint`), which is what makes one account holding several
@@ -718,7 +720,7 @@ a coverage table so each of the three is traceable to exactly one task.
       order the RPC listed them
     - _Requirements: 20.1, 20.2, 20.3, 20.4, 20.5, 20.6, 20.7, 20.8, 20.9_
 
-  - [ ] 8.4 Implement compute unit extraction: total and top-level per-instruction
+  - [x] 8.4 Implement compute unit extraction: total and top-level per-instruction
     - Create `src/analyze/compute.ts` reading `compute.total` verbatim from
       `meta.computeUnitsConsumed`, reporting a genuine zero as `0` and an absent
       value as the `available: false` variant with `raw` confidence rather than a
@@ -756,6 +758,14 @@ a coverage table so each of the three is traceable to exactly one task.
       pin the per-instruction value for every top-level instruction, so a
       misattribution shifts a value between adjacent nodes and fails a golden
       test
+    - **Deviation as implemented:** design.md's flat "scope count equals top-level
+      instruction count" guard holds on only 2 of the 6 recorded fixtures, since
+      execution halts at the failing instruction and the instructions after it emit
+      no scope. The implementation compares against an *expected* count — top-level
+      on success, `failingInstructionIndex + 1` on a failure — aligning 6 of 6, with
+      the unexecuted tail reported `available: false` under a distinct
+      `never-executed` reason: stricter than flat equality on failed transactions,
+      not weaker
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5_
 
 - [ ] 9. Author and hand-review the six pinned `expected.json` ground-truth files

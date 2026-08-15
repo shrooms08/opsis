@@ -280,8 +280,41 @@ export type UnresolvedErrorReason =
   | 'no-idl'
   /** Absent from the table that governs it. Requirement 6.6, 6.10. */
   | 'not-in-table'
+  /**
+   * The code falls in a range some framework uses, but nothing in the response
+   * attests that the raising program is that framework, so no table governs it.
+   * See "Anchor attestation" in the errorResolver section. Requirement 6.11.
+   */
+  | 'unattested-namespace'
   /** Not parseable as an integer. Requirement 6.9. */
   | 'unparseable-code';
+
+/**
+ * How the namespace of a resolved error was established. Recorded so that a
+ * reviewer reading an `expected.json` can see whether a framework resolution
+ * rested on the program saying so or on a local artifact; golden files pin it.
+ * Requirement 6.12.
+ */
+export type ErrorAttestation =
+  /**
+   * The namespace follows from the failing instruction's program ID by address
+   * equality against a well-known program. A fact, not an inference.
+   * Requirement 6.3, 6.8, 6.14.
+   */
+  | 'program-id'
+  /**
+   * An `AnchorError` log line in the verbatim log array reported an
+   * `Error Number` equal to this code. Strongest tier: the program named the
+   * error during this execution, and `name` and `message` below are taken from
+   * that log line verbatim rather than from a table. Requirement 6.13, 6.15.
+   */
+  | 'anchor-error-log'
+  /**
+   * A loaded Anchor IDL exists for the raising program's ID. Weaker than a log
+   * line, since an IDL is static and may be stale or describe another deployed
+   * version. Requirement 6.16, 18.
+   */
+  | 'idl';
 
 export type ResolvedError =
   | {
@@ -289,7 +322,19 @@ export type ResolvedError =
       readonly code: number;
       readonly namespace: ErrorNamespace;
       readonly name: string;
-      readonly message: string;
+      /**
+       * The declared message, or `null` when the artifact that named the error
+       * carried no message for it — an IDL `errors` entry with `msg: null` is
+       * the reachable case. `null` rather than the name or an empty string: the
+       * name is real evidence, and the message genuinely is not there.
+       *
+       * Widens design.md's `string`, which assumed every named error also has a
+       * message. `IdlErrorCode.msg` is nullable in the format, so the assumption
+       * does not hold; see the header of `resolve/errorResolver.ts`.
+       */
+      readonly message: string | null;
+      /** What established the namespace. See ErrorAttestation. Req 6.12. */
+      readonly attestation: ErrorAttestation;
       readonly programId: Base58Address | null;
       readonly confidence: 'full';
     }

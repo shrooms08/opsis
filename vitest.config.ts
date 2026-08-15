@@ -10,9 +10,11 @@ export default defineConfig({
     // 127.0.0.1, so the offline guarantee is enforced rather than assumed.
     setupFiles: ['tests/setup/noNetwork.ts'],
     watch: false,
-    // Wave 1 has no test files yet; later waves fill tests/ in. Without this,
-    // vitest exits non-zero on an empty suite and `npm test` fails for a
-    // reason that has nothing to do with correctness.
-    passWithNoTests: true,
+    // `passWithNoTests` was wave-1 scaffolding and is deliberately absent now
+    // that real test files exist (task 4.4). With it set, a config that
+    // discovers nothing exits green, so a broken `include` glob, a renamed test
+    // directory, or a vitest upgrade that changes discovery would all produce a
+    // passing run with nothing executed. Leaving it would plant exactly the
+    // silent-green failure the golden harness `pending` state exists to prevent.
   },
 });

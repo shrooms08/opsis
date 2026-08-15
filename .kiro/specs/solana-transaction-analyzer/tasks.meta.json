@@ -1,5 +1,10 @@
 {
-  "pbtResults": {},
+  "pbtResults": {
+    "8.2 Write property test for lamport delta exactness": {
+      "status": "passed",
+      "lastRunTimestamp": 1786810930127
+    }
+  },
   "executionHistory": {
     "2.1 Implement the fixture recorder": [
       {

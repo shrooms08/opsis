@@ -1,0 +1,740 @@
+/**
+ * Anchor IDL instruction decoding and positional account naming.
+ *
+ * Satisfies Requirements 4.1, 7.12, 7.13, and the `partial` half of 11.3.
+ *
+ * `idlStore.ts` deliberately leaves `IdlTypeNode` as `unknown`: interpreting the
+ * Anchor type grammar is this module's job. Everything below is that
+ * interpretation, plus the two things a caller wants from an IDL — which
+ * instruction a payload is, and what the instruction calls its accounts.
+ *
+ * **The discriminator.** An Anchor instruction payload opens with the first
+ * eight bytes of `sha256("global:" + snake_case_name)`. That is the whole of the
+ * match (Req 4.1): the name in the IDL is not compared against anything in the
+ * payload, because the payload does not carry a name. `sha256` here is a hash of
+ * a fixed string, not a source of randomness, so it does not touch the
+ * determinism guarantee — the same IDL always produces the same eight bytes on
+ * every machine and every run. Discriminators are computed **once** per IDL in
+ * `createIdlDecoder` and kept in a map keyed by hex, never per decode call.
+ *
+ * Names in the legacy IDL format `idlStore.ts` validates are conventionally
+ * already snake_case, so `toSnakeCase` is usually the identity. It is applied
+ * anyway because some Anchor versions emit instruction names in camelCase for
+ * their JS clients while the discriminator is still derived from the snake_case
+ * Rust function name, and in that case skipping the conversion would make every
+ * instruction in the file unmatchable.
+ *
+ * **The wire format after the discriminator is Borsh**, which differs from the
+ * bincode the System Program uses in exactly the place it costs most: a
+ * length prefix — for `string`, `bytes`, and `vec` — is a **`u32`** little-endian
+ * count, not bincode's `u64`. Read as a `u64`, every string in every Anchor
+ * payload would come out four bytes long and wrong.
+ *
+ * Every 64-bit and 128-bit integer is assembled in `bigint` and emitted as a
+ * decimal string. Nothing here passes a value through `Number` unless it is at
+ * most 32 bits wide, where the conversion is exact: a `u64` above 2^53 rounds in
+ * a double, and a rounded value has the right shape, the right magnitude, and
+ * the wrong digits (Req 9.2).
+ *
+ * **Four outcomes, and what forces each one.**
+ *
+ * - `full` — every declared argument was read and the payload ended exactly
+ *   where the last one did.
+ * - `partial` — one of three things happened, all of them meaning "the name is
+ *   right and something about the arguments is not":
+ *   1. A field's type has no representation in `DecodedValue` but a **known
+ *      width**, i.e. `f32`/`f64`. The bytes are consumed so the fields after it
+ *      still decode, the field itself is recorded as `unsupported`, and the
+ *      instruction is forced to `partial` even when the payload is fully
+ *      consumed. There is no float anywhere in `Analysis` and this is the reason
+ *      the `unsupported` variant exists (Req 9.2, 9.3).
+ *   2. A field's type has an **unknown width** — `{ defined: "Foo" }`, a
+ *      generic, anything unrecognized. Decoding stops there rather than guessing
+ *      a layout, and everything from that field onward becomes the unconsumed
+ *      suffix.
+ *   3. Every argument was read but bytes remain (Req 11.3). Reporting `full`
+ *      would claim the suffix had been understood.
+ *   In all three cases the registry turns `remaining` into `undecodedData`. As
+ *   in `builtin/systemProgram.ts`, `remaining` is occasionally **empty** on a
+ *   `partial` — case 1 with a fully consumed payload — and that is deliberate:
+ *   the fields were read, one of them could not be represented, and there is no
+ *   tail to show.
+ * - `no-match` — the payload is shorter than eight bytes, or its first eight
+ *   bytes are not a discriminator this IDL declares. Not an error: Requirement
+ *   4.7 has the registry fall through to a built-in decoder in exactly this
+ *   case.
+ * - `error` — the payload ended in the middle of a declared argument. A
+ *   truncated payload is a decode failure and not a zero-filled field: an IDL
+ *   that says a `u64` is there against a payload that only has three bytes left
+ *   means one of the two is wrong, and inventing the missing five bytes would
+ *   report a number no program ever wrote. This is a narrower policy than
+ *   `systemProgram.ts`, which downgrades a mid-instruction truncation to
+ *   `partial`; the difference is that a built-in table is a hard-coded fact
+ *   about a program that cannot be stale, whereas an IDL on disk can describe a
+ *   different deployed version than the one that ran, and a short payload is one
+ *   of the ways that shows up.
+ *
+ * **Two shapes `DecodedValue` cannot express, and what is emitted instead.**
+ * `DecodedField` is a flat name/value pair and `DecodedValue` has no composite
+ * and no null variant, so composites are flattened into indexed leaves rather
+ * than modelled:
+ *
+ * - A `vec` or `array` emits one field per element, named `field[0]`,
+ *   `field[1]`, …, preceded for a `vec` by `field.len` carrying the decoded
+ *   element count so an empty vector is still visible as a field. A `vec<u8>` or
+ *   `[u8; n]` instead emits a single `bytes` value, since a byte string is what
+ *   it is and 32 separate `u8` fields would be unreadable.
+ * - An `option` emits `field.isSome` as a `bool`, followed by the value itself
+ *   only when it is present. A `none` cannot be written as a value at all: `0`
+ *   would be a fabricated number and omitting the field entirely would make an
+ *   absent optional indistinguishable from an argument the decoder never saw.
+ *   Both readings would be worse than an explicit `false`.
+ *
+ * Neither is a widening of the model, and both are reported to the reader
+ * exactly as they were decoded.
+ *
+ * **Account naming (Req 7.12, 7.13)** is positional and nothing else. The k-th
+ * `AccountRef` takes the k-th name of the instruction's account list flattened
+ * depth-first, which is what `IdlInstructionAccount`'s `group` variant was
+ * preserved for. Surplus accounts beyond what the IDL declares keep `name:
+ * null`, an instruction with fewer accounts than the IDL declares is not an
+ * error either, and an instruction with no matching IDL entry keeps every name
+ * `null` while every address stays exactly as it was. No position the IDL does
+ * not cover ever receives a name.
+ *
+ * Nothing in this module reads a file, writes to a stream, or throws. Every
+ * failure is one of the `DecodeOutcome` variants.
+ */
+
+import { createHash } from 'node:crypto';
+
+import bs58 from 'bs58';
+
+import type {
+  AccountRef,
+  Base58Address,
+  DecodedField,
+  DecodedValue,
+  HexString,
+} from '../../model/analysis.js';
+import type { DecodeOutcome, InstructionDecoder } from '../registry.js';
+import type { IdlInstruction, IdlInstructionAccount, IdlStore, IdlTypeNode, LoadedIdl } from './idlStore.js';
+
+// ---------------------------------------------------------------------------
+// Wire constants
+// ---------------------------------------------------------------------------
+
+/** Anchor's instruction discriminator width. Requirement 4.1. */
+export const DISCRIMINATOR_BYTES = 8;
+
+const PUBKEY_BYTES = 32;
+
+/** Borsh length prefix for `string`, `bytes`, and `vec`. A u32, not a u64. */
+const LENGTH_PREFIX_BYTES = 4;
+
+/** Borsh `Option` tag. */
+const OPTION_TAG_BYTES = 1;
+
+// ---------------------------------------------------------------------------
+// Public surface
+// ---------------------------------------------------------------------------
+
+/**
+ * One program's IDL-backed decoder.
+ *
+ * Extends `InstructionDecoder` so the registry can hold it alongside the
+ * built-ins, and adds the two operations only an IDL can perform: naming the
+ * accounts of a matched instruction, and reporting *which* instruction matched
+ * so a caller can do both without decoding twice.
+ */
+export interface IdlDecoder extends InstructionDecoder {
+  readonly source: 'anchor-idl';
+  /** The IDL this decoder was built from, for diagnostics. */
+  readonly idl: LoadedIdl;
+  /**
+   * The instruction whose discriminator opens `data`, or `null` when the IDL
+   * declares none — which is Requirement 4.7's fall-through, not a failure.
+   */
+  match(data: Uint8Array): IdlInstruction | null;
+  /**
+   * `data`'s accounts with IDL names applied positionally (Req 7.12). Returns
+   * `accounts` unchanged when no IDL instruction matches (Req 7.13).
+   */
+  nameAccounts(data: Uint8Array, accounts: readonly AccountRef[]): readonly AccountRef[];
+}
+
+/**
+ * Build a decoder for one loaded IDL, computing every discriminator up front.
+ *
+ * The returned value is immutable and safe to share. When two instructions
+ * reduce to the same discriminator — possible only if their names differ solely
+ * by case convention — the first in IDL order wins, so the mapping stays a
+ * function of the file's contents and not of insertion timing.
+ */
+export function createIdlDecoder(idl: LoadedIdl): IdlDecoder {
+  const byDiscriminator = new Map<string, IdlInstruction>();
+  for (const instruction of idl.instructions) {
+    const key = toHexDigits(anchorDiscriminator(instruction.name));
+    if (!byDiscriminator.has(key)) byDiscriminator.set(key, instruction);
+  }
+
+  function match(data: Uint8Array): IdlInstruction | null {
+    if (data.length < DISCRIMINATOR_BYTES) return null;
+    return byDiscriminator.get(toHexDigits(data.subarray(0, DISCRIMINATOR_BYTES))) ?? null;
+  }
+
+  function decode(data: Uint8Array, _accounts: readonly AccountRef[]): DecodeOutcome {
+    const instruction = match(data);
+    if (instruction === null) return { kind: 'no-match' };
+    return decodeArgs(instruction, data.subarray(DISCRIMINATOR_BYTES));
+  }
+
+  function nameAccounts(
+    data: Uint8Array,
+    accounts: readonly AccountRef[],
+  ): readonly AccountRef[] {
+    const instruction = match(data);
+    if (instruction === null) return accounts;
+    return applyAccountNames(instruction, accounts);
+  }
+
+  return { source: 'anchor-idl', programId: idl.address, idl, match, decode, nameAccounts };
+}
+
+/**
+ * One decoder per loaded IDL, keyed by program ID.
+ *
+ * Exists so task 6.6 can build the top rung of the precedence ladder in one
+ * call and so the per-IDL discriminator precomputation happens exactly once for
+ * the whole store, at registry construction, rather than on some later decode.
+ */
+export function createIdlDecoders(store: IdlStore): ReadonlyMap<Base58Address, IdlDecoder> {
+  const decoders = new Map<Base58Address, IdlDecoder>();
+  for (const programId of store.programIds) {
+    const idl = store.get(programId);
+    if (idl === undefined) continue;
+    decoders.set(programId, createIdlDecoder(idl));
+  }
+  return decoders;
+}
+
+/**
+ * The first eight bytes of `sha256("global:" + snake_case(name))`.
+ *
+ * Exported because it is the one fact in this module a test can check against an
+ * independently known value, and because a wrong discriminator does not fail
+ * loudly — it silently makes every instruction of a program unmatchable.
+ */
+export function anchorDiscriminator(instructionName: string): Uint8Array {
+  const digest = createHash('sha256').update(`global:${toSnakeCase(instructionName)}`, 'utf8').digest();
+  return new Uint8Array(digest.subarray(0, DISCRIMINATOR_BYTES));
+}
+
+/**
+ * The instruction's account slot names, flattened depth-first (Req 7.12).
+ *
+ * A `group` contributes its children and not itself: a composite is a grouping
+ * of slots, not a slot, so counting it would shift every name after it by one
+ * position. Leaf names are used unqualified — the group name is a detail of how
+ * the program's Rust structs are factored, and prefixing it would produce a name
+ * for a position that reads differently from the one the IDL wrote there.
+ */
+export function flattenIdlAccountNames(
+  accounts: readonly IdlInstructionAccount[],
+): readonly string[] {
+  const names: string[] = [];
+  for (const account of accounts) {
+    if (account.kind === 'group') {
+      names.push(...flattenIdlAccountNames(account.accounts));
+      continue;
+    }
+    names.push(account.name);
+  }
+  return names;
+}
+
+/**
+ * Apply one instruction's account names positionally (Req 7.12, 7.13).
+ *
+ * `unresolved` refs are returned untouched: that variant has no `name` field by
+ * construction, because a position whose address could not be resolved has
+ * nothing for a name to describe. `confidence` is left alone as well — an IDL
+ * name does not make an address resolution any more or less complete than it
+ * already was.
+ */
+export function applyAccountNames(
+  instruction: IdlInstruction,
+  accounts: readonly AccountRef[],
+): readonly AccountRef[] {
+  const names = flattenIdlAccountNames(instruction.accounts);
+
+  return accounts.map((ref, position) => {
+    const name = names[position];
+    // Surplus accounts beyond the IDL's declaration keep `name: null`.
+    if (name === undefined || ref.kind !== 'resolved') return ref;
+    return { ...ref, name };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Argument decoding
+// ---------------------------------------------------------------------------
+
+/**
+ * Decode the Borsh argument payload that follows the discriminator.
+ *
+ * Exported for tests and for a caller that already knows which instruction it
+ * holds; `IdlDecoder.decode` is the ordinary entry point.
+ */
+export function decodeArgs(instruction: IdlInstruction, payload: Uint8Array): DecodeOutcome {
+  const cursor = new Cursor(payload);
+  const fields: DecodedField[] = [];
+  let unrepresentable = false;
+
+  for (const arg of instruction.args) {
+    const status = readNode(cursor, fields, arg.name, arg.type);
+
+    switch (status.kind) {
+      case 'ok':
+        break;
+      case 'unsupported':
+        // Known width, so the bytes were consumed and the arguments after this
+        // one still land at the right offsets. The instruction can never be
+        // `full` again.
+        unrepresentable = true;
+        break;
+      case 'halt':
+        // Unknown width. Everything from here on is unaccounted for.
+        return { kind: 'partial', name: instruction.name, fields, remaining: cursor.tail() };
+      case 'short':
+        return {
+          kind: 'error',
+          detail:
+            `IDL instruction ${instruction.name} declares argument "${arg.name}", but ` +
+            `${status.detail}, so the payload does not satisfy the declared arguments`,
+        };
+    }
+  }
+
+  if (unrepresentable || cursor.remaining > 0) {
+    // Requirement 11.3. `remaining` is empty when the only reason for `partial`
+    // was an unrepresentable field in a fully consumed payload.
+    return { kind: 'partial', name: instruction.name, fields, remaining: cursor.tail() };
+  }
+
+  return { kind: 'full', name: instruction.name, fields };
+}
+
+/**
+ * What reading one type node concluded.
+ *
+ * - `ok` — the value was read and appended, and the cursor advanced past it.
+ * - `unsupported` — the width was known and consumed, but the value has no
+ *   `DecodedValue` representation. An `unsupported` field was appended and the
+ *   instruction can no longer be `full`.
+ * - `halt` — the width is unknown. An `unsupported` field was appended and the
+ *   cursor was **not** advanced, so the caller's `tail()` starts at this value.
+ * - `short` — the payload ended inside this value. `detail` says how.
+ */
+type ReadStatus =
+  | { readonly kind: 'ok' }
+  | { readonly kind: 'unsupported' }
+  | { readonly kind: 'halt' }
+  | { readonly kind: 'short'; readonly detail: string };
+
+const OK: ReadStatus = { kind: 'ok' };
+const UNSUPPORTED: ReadStatus = { kind: 'unsupported' };
+
+/** Integer types narrow enough that `Number` is exact. */
+const SMALL_INTS = new Map<
+  string,
+  {
+    readonly bytes: number;
+    readonly signed: boolean;
+    readonly type: 'u8' | 'u16' | 'u32' | 'i8' | 'i16' | 'i32';
+  }
+>([
+  ['u8', { bytes: 1, signed: false, type: 'u8' }],
+  ['i8', { bytes: 1, signed: true, type: 'i8' }],
+  ['u16', { bytes: 2, signed: false, type: 'u16' }],
+  ['i16', { bytes: 2, signed: true, type: 'i16' }],
+  ['u32', { bytes: 4, signed: false, type: 'u32' }],
+  ['i32', { bytes: 4, signed: true, type: 'i32' }],
+]);
+
+/** Integer types that must never touch a double. Carried as decimal strings. */
+const BIG_INTS = new Map<
+  string,
+  {
+    readonly bytes: number;
+    readonly signed: boolean;
+    readonly type: 'u64' | 'i64' | 'u128' | 'i128';
+  }
+>([
+  ['u64', { bytes: 8, signed: false, type: 'u64' }],
+  ['i64', { bytes: 8, signed: true, type: 'i64' }],
+  ['u128', { bytes: 16, signed: false, type: 'u128' }],
+  ['i128', { bytes: 16, signed: true, type: 'i128' }],
+]);
+
+/**
+ * Float widths. Present so the bytes can be *skipped* correctly; the values are
+ * never read, because `Analysis` has no float.
+ */
+const FLOATS = new Map<string, number>([
+  ['f32', 4],
+  ['f64', 8],
+]);
+
+/** Anchor has spelled the 32-byte address type both ways across versions. */
+const PUBKEY_TYPES: ReadonlySet<string> = new Set(['publicKey', 'pubkey']);
+
+/**
+ * Read one type node, appending zero or more leaf fields to `fields`.
+ *
+ * Recursive for `vec`, `option`, and `array`. Every read is bounds-checked
+ * before it happens, so no path reads past the end of the payload.
+ */
+function readNode(
+  cursor: Cursor,
+  fields: DecodedField[],
+  name: string,
+  node: IdlTypeNode,
+): ReadStatus {
+  if (typeof node === 'string') return readScalar(cursor, fields, name, node);
+  if (isRecord(node)) return readComposite(cursor, fields, name, node);
+
+  // Not a string and not an object: not a type this grammar has. No layout to
+  // guess at, so decoding stops rather than inventing one.
+  fields.push(unsupportedField(name, describeType(node)));
+  return { kind: 'halt' };
+}
+
+function readScalar(
+  cursor: Cursor,
+  fields: DecodedField[],
+  name: string,
+  type: string,
+): ReadStatus {
+  if (type === 'bool') {
+    if (!cursor.has(1)) return short(name, 1, cursor.remaining);
+    // Borsh writes 0 or 1. A byte outside that is malformed, but its width is
+    // not in doubt, so it reads as `true` rather than derailing the whole
+    // payload at a one-byte field.
+    fields.push({ name, value: { type: 'bool', value: cursor.readUint(1) !== 0n } });
+    return OK;
+  }
+
+  const small = SMALL_INTS.get(type);
+  if (small !== undefined) {
+    if (!cursor.has(small.bytes)) return short(name, small.bytes, cursor.remaining);
+    const value = small.signed ? cursor.readInt(small.bytes) : cursor.readUint(small.bytes);
+    // At most 32 bits wide, so this conversion is exact.
+    fields.push({ name, value: { type: small.type, value: Number(value) } });
+    return OK;
+  }
+
+  const big = BIG_INTS.get(type);
+  if (big !== undefined) {
+    if (!cursor.has(big.bytes)) return short(name, big.bytes, cursor.remaining);
+    const value = big.signed ? cursor.readInt(big.bytes) : cursor.readUint(big.bytes);
+    fields.push({ name, value: { type: big.type, value: value.toString(10) } });
+    return OK;
+  }
+
+  if (PUBKEY_TYPES.has(type)) {
+    if (!cursor.has(PUBKEY_BYTES)) return short(name, PUBKEY_BYTES, cursor.remaining);
+    fields.push({ name, value: { type: 'pubkey', value: bs58.encode(cursor.readBytes(PUBKEY_BYTES)) } });
+    return OK;
+  }
+
+  if (type === 'string') {
+    const length = readLengthPrefix(cursor);
+    if (length === null) return short(name, LENGTH_PREFIX_BYTES, cursor.remaining);
+    if (length > cursor.remaining) return short(name, length, cursor.remaining);
+    fields.push({ name, value: { type: 'string', value: decodeUtf8(cursor.readBytes(length)) } });
+    return OK;
+  }
+
+  if (type === 'bytes') {
+    const length = readLengthPrefix(cursor);
+    if (length === null) return short(name, LENGTH_PREFIX_BYTES, cursor.remaining);
+    if (length > cursor.remaining) return short(name, length, cursor.remaining);
+    fields.push({ name, value: { type: 'bytes', value: toHexString(cursor.readBytes(length)) } });
+    return OK;
+  }
+
+  const floatWidth = FLOATS.get(type);
+  if (floatWidth !== undefined) {
+    if (!cursor.has(floatWidth)) return short(name, floatWidth, cursor.remaining);
+    // The width is known, so the bytes are skipped and the following arguments
+    // stay aligned. The value itself is not representable: there is no float in
+    // `Analysis`, and this forces the instruction to `partial`.
+    cursor.skip(floatWidth);
+    fields.push(unsupportedField(name, type));
+    return UNSUPPORTED;
+  }
+
+  // A named type this decoder does not know — `u256`, a type alias, anything a
+  // newer IDL version introduces. Its width is unknown.
+  fields.push(unsupportedField(name, type));
+  return { kind: 'halt' };
+}
+
+function readComposite(
+  cursor: Cursor,
+  fields: DecodedField[],
+  name: string,
+  node: Readonly<Record<string, unknown>>,
+): ReadStatus {
+  if ('vec' in node) return readVec(cursor, fields, name, node['vec']);
+  if ('option' in node) return readOption(cursor, fields, name, node['option']);
+  if ('array' in node) return readArray(cursor, fields, name, node['array']);
+
+  // `{ defined: "Foo" }`, `{ generic: "T" }`, a struct, a hash map: a layout
+  // this module would have to guess at. It does not guess.
+  fields.push(unsupportedField(name, describeType(node)));
+  return { kind: 'halt' };
+}
+
+function readVec(
+  cursor: Cursor,
+  fields: DecodedField[],
+  name: string,
+  element: IdlTypeNode,
+): ReadStatus {
+  const count = readLengthPrefix(cursor);
+  if (count === null) return short(name, LENGTH_PREFIX_BYTES, cursor.remaining);
+
+  // A byte vector is a byte string, not a list of numbered fields.
+  if (element === 'u8') {
+    if (count > cursor.remaining) return short(name, count, cursor.remaining);
+    fields.push({ name, value: { type: 'bytes', value: toHexString(cursor.readBytes(count)) } });
+    return OK;
+  }
+
+  // Every element occupies at least one byte, so a count beyond the remaining
+  // length cannot be satisfied. Checked before the loop so a corrupt or hostile
+  // length cannot drive a long iteration.
+  if (count > cursor.remaining) return short(name, count, cursor.remaining);
+
+  // The count is emitted so an empty vector is still visible as a field rather
+  // than as nothing at all.
+  fields.push({ name: `${name}.len`, value: { type: 'u32', value: count } });
+  return readElements(cursor, fields, name, element, count);
+}
+
+function readOption(
+  cursor: Cursor,
+  fields: DecodedField[],
+  name: string,
+  inner: IdlTypeNode,
+): ReadStatus {
+  if (!cursor.has(OPTION_TAG_BYTES)) return short(name, OPTION_TAG_BYTES, cursor.remaining);
+  const present = cursor.readUint(OPTION_TAG_BYTES) !== 0n;
+
+  // The presence marker is always emitted. `DecodedValue` has no null, and both
+  // alternatives — a fabricated zero, or an omitted field — would misreport a
+  // `none` as something it is not.
+  fields.push({ name: `${name}.isSome`, value: { type: 'bool', value: present } });
+  if (!present) return OK;
+
+  return readNode(cursor, fields, name, inner);
+}
+
+function readArray(
+  cursor: Cursor,
+  fields: DecodedField[],
+  name: string,
+  spec: unknown,
+): ReadStatus {
+  // `[T, n]`. A non-literal length — Anchor's `{ generic: "N" }` form — leaves
+  // the layout unknown.
+  if (!Array.isArray(spec) || spec.length !== 2) {
+    fields.push(unsupportedField(name, describeType({ array: spec })));
+    return { kind: 'halt' };
+  }
+
+  const element = spec[0] as IdlTypeNode;
+  const declared = spec[1];
+  if (typeof declared !== 'number' || !Number.isSafeInteger(declared) || declared < 0) {
+    fields.push(unsupportedField(name, describeType({ array: spec })));
+    return { kind: 'halt' };
+  }
+
+  if (element === 'u8') {
+    if (declared > cursor.remaining) return short(name, declared, cursor.remaining);
+    fields.push({ name, value: { type: 'bytes', value: toHexString(cursor.readBytes(declared)) } });
+    return OK;
+  }
+
+  if (declared > cursor.remaining) return short(name, declared, cursor.remaining);
+  // No `.len` field: a fixed-size array's length is in the IDL, not the payload.
+  return readElements(cursor, fields, name, element, declared);
+}
+
+/** `count` elements of one type, named `field[0]`, `field[1]`, … */
+function readElements(
+  cursor: Cursor,
+  fields: DecodedField[],
+  name: string,
+  element: IdlTypeNode,
+  count: number,
+): ReadStatus {
+  let unrepresentable = false;
+
+  for (let index = 0; index < count; index += 1) {
+    const status = readNode(cursor, fields, `${name}[${index}]`, element);
+    if (status.kind === 'short' || status.kind === 'halt') return status;
+    if (status.kind === 'unsupported') unrepresentable = true;
+  }
+
+  return unrepresentable ? UNSUPPORTED : OK;
+}
+
+/** The Borsh u32 length prefix, or `null` when four bytes are not there. */
+function readLengthPrefix(cursor: Cursor): number | null {
+  if (!cursor.has(LENGTH_PREFIX_BYTES)) return null;
+  // A u32 is always a safe integer, so this conversion is exact.
+  return Number(cursor.readUint(LENGTH_PREFIX_BYTES));
+}
+
+function short(name: string, needed: number, available: number): ReadStatus {
+  return {
+    kind: 'short',
+    detail: `"${name}" needs ${needed} more byte(s) and only ${available} remain`,
+  };
+}
+
+function unsupportedField(name: string, idlType: string): DecodedField {
+  const value: DecodedValue = { type: 'unsupported', idlType };
+  return { name, value };
+}
+
+// ---------------------------------------------------------------------------
+// Cursor
+// ---------------------------------------------------------------------------
+
+/**
+ * A bounds-checked forward reader.
+ *
+ * Multi-byte integers are assembled from `bigint` shifts rather than read
+ * through `DataView`, so one code path covers every width from 1 to 16 bytes and
+ * no 128-bit value has to be stitched together from two 64-bit halves. The bytes
+ * are walked with `for…of` over a `subarray`, so nothing here indexes the array
+ * and `noUncheckedIndexedAccess` has no `undefined` to produce.
+ */
+class Cursor {
+  private readonly bytes: Uint8Array;
+  private offset = 0;
+
+  constructor(bytes: Uint8Array) {
+    this.bytes = bytes;
+  }
+
+  get remaining(): number {
+    return this.bytes.length - this.offset;
+  }
+
+  has(count: number): boolean {
+    return count >= 0 && this.remaining >= count;
+  }
+
+  skip(count: number): void {
+    this.offset += count;
+  }
+
+  readBytes(count: number): Uint8Array {
+    const slice = this.bytes.subarray(this.offset, this.offset + count);
+    this.offset += count;
+    return slice;
+  }
+
+  /** Little-endian unsigned, any width. */
+  readUint(byteLength: number): bigint {
+    let value = 0n;
+    let shift = 0n;
+    for (const byte of this.readBytes(byteLength)) {
+      value |= BigInt(byte) << shift;
+      shift += 8n;
+    }
+    return value;
+  }
+
+  /** Little-endian two's complement. */
+  readInt(byteLength: number): bigint {
+    const magnitude = this.readUint(byteLength);
+    const bits = BigInt(byteLength) * 8n;
+    const sign = 1n << (bits - 1n);
+    return magnitude >= sign ? magnitude - (1n << bits) : magnitude;
+  }
+
+  /** Everything not yet consumed. Empty when the payload was fully read. */
+  tail(): Uint8Array {
+    return this.bytes.subarray(this.offset);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * camelCase → snake_case, and the identity on a name that is already
+ * snake_case. The two replacements handle `createOrder` → `create_order` and
+ * `initNFTMint` → `init_nft_mint`, so a run of capitals does not become one
+ * underscore per letter.
+ */
+export function toSnakeCase(name: string): string {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .toLowerCase();
+}
+
+/**
+ * Lowercase hex digits, no prefix and no separators.
+ *
+ * `registry.ts` has its own copy for `RawData`. They are deliberately not
+ * shared: that one applies Requirement 11.6's 256-byte truncation, which must
+ * never be applied to a decoded field value — a truncated `bytes` field would
+ * look like a complete short one.
+ */
+function toHexDigits(bytes: Uint8Array): string {
+  let hex = '';
+  for (const byte of bytes) {
+    hex += byte.toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+/** `HexString`: lowercase hex, `0x`-prefixed (Req 11.5). */
+function toHexString(bytes: Uint8Array): HexString {
+  return `0x${toHexDigits(bytes)}`;
+}
+
+/**
+ * Non-fatal UTF-8, as in `builtin/systemProgram.ts`: a malformed string is
+ * program-supplied data, and throwing would escape a decoder that promises not
+ * to.
+ */
+function decodeUtf8(bytes: Uint8Array): string {
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+
+/**
+ * A type node as text, for `unsupported.idlType`. The reader needs to see what
+ * the IDL actually said, which for a composite means its JSON.
+ */
+function describeType(node: IdlTypeNode): string {
+  if (typeof node === 'string') return node;
+  try {
+    return JSON.stringify(node) ?? String(node);
+  } catch {
+    return String(node);
+  }
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

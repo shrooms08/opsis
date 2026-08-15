@@ -31,48 +31,7 @@ import type {
   Base58Address,
   MessageVersion,
 } from '../model/analysis.js';
-
-// ---------------------------------------------------------------------------
-// Structural view of the RPC response
-// ---------------------------------------------------------------------------
-
-/*
- * NOTE: task 4.4 owns the canonical `RawTransactionResponse` in
- * `src/source/index.ts`. The types below are the minimal structural view this
- * module needs, declared locally so the two tasks do not collide. They must be
- * reconciled once 4.4 lands: this module should import the canonical type and
- * delete the local declarations.
- */
-
-/** Message header, per the Solana message layout. */
-export interface RawMessageHeader {
-  readonly numRequiredSignatures: number;
-  readonly numReadonlySignedAccounts: number;
-  readonly numReadonlyUnsignedAccounts: number;
-}
-
-/** `meta.loadedAddresses`, the address lookup table resolution (Req 19.4). */
-export interface RawLoadedAddresses {
-  readonly writable: readonly Base58Address[];
-  readonly readonly: readonly Base58Address[];
-}
-
-export interface RawMessage {
-  readonly header: RawMessageHeader;
-  readonly accountKeys: readonly Base58Address[];
-}
-
-export interface RawMeta {
-  readonly loadedAddresses?: RawLoadedAddresses | null;
-}
-
-export interface RawTransactionResponse {
-  /** Absent on older responses, which are legacy by definition. */
-  readonly version?: 'legacy' | 0;
-  readonly transaction: { readonly message: RawMessage };
-  /** Null when the node returned no metadata. */
-  readonly meta?: RawMeta | null;
-}
+import type { RawMessageHeader, RawTransactionResponse } from '../model/rawResponse.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
