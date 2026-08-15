@@ -1,0 +1,8 @@
+{
+  "case": "03-program-table-error",
+  "covers": "SPL ATA failure, Custom 1 at top-level index 3. Code 1 exists in the System, SPL Token, and ATA tables simultaneously, so resolving it correctly proves the failing program ID selects the namespace rather than the numeric value (Req 6.3, 6.8). Attestation is program-id, requiring no Anchor inference. Also the suite's only legacy message, exercising the non-v0 account resolution path.",
+  "cluster": "mainnet-beta",
+  "recordedOn": "2026-08-15",
+  "signature": "5xis1MD1MQXM7xtrCUESivrizTtfdq14B7huubfoaRM3FbcxWe6CN6wxW6G4m3DQmhWgUngFXMh63Sx3AChVJgkZ",
+  "outcome": "failed"
+}

@@ -1,0 +1,9 @@
+{
+  "case": "04-unattested-band-collision",
+  "covers": "The negative case for Anchor framework range matching. The transaction carries Custom 5000, which falls inside the Anchor framework band of 2000-5999, raised by Prism8hsRo6Ww5jiN5Zeh3YDPLZHqHduCPSAV7JF7qv, and its log array contains no AnchorError line — it logs 'No profitable buy/sell pair was found.' and fails with 'custom program error: 0x1388'. Because no Anchor attestation exists for that program, the correct outcome is the unresolved variant with reason unattested-namespace at raw confidence, carrying the numeric code and no message. The fixture therefore proves that a code is not range-matched into the Anchor framework table merely because it sits in that band. Also a v0 message carrying writable loaded addresses.",
+  "cluster": "mainnet-beta",
+  "recordedOn": "2026-08-15",
+  "signature": "2CuHMnrN5g66nwquYDCC7o1pchFqjKwgaZZtUWDGaji51ebVtxh8cnCkMjeh4ieUUDLevvLkhrVrTihkZGCGXE9f",
+  "outcome": "failed",
+  "recordingNote": "Originally recorded and named 04-anchor-framework-error on the assumption that a code in 2000-5999 is an Anchor framework error. Inspecting the recorded log array showed that assumption is false for this transaction: the raising program emits no AnchorError line, so nothing in the response attests that it is an Anchor program, and the code in that band is its own private enum value. The case was renamed to describe what it actually pins. A positive Anchor framework case — a code in 2000-5999 that does carry a matching AnchorError log line — is still unrecorded."
+}

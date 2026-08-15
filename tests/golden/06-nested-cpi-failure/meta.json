@@ -1,0 +1,8 @@
+{
+  "case": "06-nested-cpi-failure",
+  "covers": "Failure whose failing top-level instruction has children: InstructionError names top-level index 3, that index has an innerInstructions group of 6 nested instructions, and maxStackHeight is 3. Pins Req 5.2 where it is subtle — the mark belongs on the top-level node and on no nested node, and cpiAttribution stays null in v1. Error is Custom 6001, an Anchor user-defined code.",
+  "cluster": "mainnet-beta",
+  "recordedOn": "2026-08-15",
+  "signature": "Hh5n4LsC5F6HRAphoZ1siE2tEcDh7ZynRcWQV3cA6mUoG2E4paPZgtdEsuNyo9rzLA3CyeqN45v72SNAr6ykUve",
+  "outcome": "failed"
+}

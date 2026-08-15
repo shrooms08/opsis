@@ -78,10 +78,10 @@ flowchart TD
 
     subgraph resolve["resolve — pure functions, no I/O"]
         registry --> failure["failure.ts<br/>InstructionError → top-level index<br/>Req 5.1-5.4"]
-        failure --> errors["errorResolver.ts<br/>namespace by table membership<br/>Req 6"]
-        errors --> logs["logs.ts — v1<br/>verbatim logMessages copy<br/>present / truncated only<br/>Req 21.1, 21.5, 21.6"]
+        failure --> logs["logs.ts — v1<br/>verbatim logMessages copy<br/>present / truncated only<br/>Req 21.1, 21.5, 21.6"]
+        logs --> errors["errorResolver.ts<br/>namespace by attested table membership<br/>Req 6"]
         logs -. "deferred" .-> assoc["logs.ts — Phase 2<br/>invoke/success scope stack at every depth<br/>per-line attribution, CPI attribution<br/>Req 21.2-21.4, 5.5"]
-        logs --> bal["balances.ts + tokenBalances.ts<br/>bigint deltas → decimal strings<br/>Req 7.8-7.10, 20"]
+        errors --> bal["balances.ts + tokenBalances.ts<br/>bigint deltas → decimal strings<br/>Req 7.8-7.10, 20"]
         bal --> cu["compute.ts<br/>total verbatim from meta<br/>top-level per-instruction from depth-1 markers<br/>Req 8"]
         logs -. "depth-1 scopes only" .-> cu
     end
@@ -419,14 +419,28 @@ export function resolveError(
   err: RawTransactionError,
   failingProgramId: Base58Address | null,
   idls: IdlStore,
+  logs: LogReport,
 ): ResolvedError;
 ```
 
+The `LogReport` parameter is what makes the attestation rule below implementable.
+It sequences `captureLogs` before `resolveError`, which costs nothing: verbatim
+capture reads only `meta.logMessages` and has no dependency on error resolution,
+so the ordering is free to run that way.
+
 Resolution order:
 
-1. Code ≥ 6000 → the failing program's Anchor IDL `errors` array (Req 6.1). No
-   IDL for that program → `raw`, numeric code only, no message (Req 6.5).
-2. Code in 2000–5999 → the Anchor framework table (Req 6.2).
+1. Code ≥ 6000 **and the raising program attested as Anchor** → the failing
+   program's Anchor IDL `errors` array (Req 6.1). No IDL for that program →
+   `raw`, numeric code only, no message (Req 6.5). Unattested → the `unresolved`
+   variant with reason `unattested-namespace`. A code above 6000 is no more
+   self-identifying than one in the framework band: a non-Anchor program is free
+   to number its own enum from 6000 upward, so user-defined resolution is
+   subject to exactly the same gate.
+2. Code in 2000–5999 **and the raising program attested as Anchor** → the Anchor
+   framework table (Req 6.2). Range membership on its own does not license this
+   lookup; the next subsection states what does, and what happens when nothing
+   attests.
 3. Otherwise, if the failing program is System Program, SPL Token, or SPL ATA,
    consult that program's table — **by membership, not by numeric range**
    (Req 6.3). These programs number their errors from low values that overlap
@@ -444,6 +458,106 @@ program (Req 6.8).
 Tables live in `resolve/tables/` as plain frozen objects, one file per
 namespace: `anchorFramework.ts`, `systemProgram.ts`, `splToken.ts`,
 `splAssociatedTokenAccount.ts`.
+
+#### Anchor attestation: what licenses a framework lookup
+
+A `Custom` error code is an opaque u32 emitted by whatever program raised it.
+Membership in 2000–5999 is a fact about the *number*, not evidence about the
+*program*. Any non-Anchor program may define its own error enum that happens to
+occupy that band, and resolving such a code against Anchor's framework table
+produces a confident wrong answer — precisely what the honest degradation rule in
+product.md forbids. Framework resolution therefore rests on an **inference** about
+the raising program, and this design states what evidence licenses that inference
+and what confidence it carries when the evidence is weak.
+
+Two recorded fixtures make both sides concrete.
+
+`tests/golden/02-anchor-user-error` — program
+`pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA`, `err: {Custom: 6040}` — carries
+this line in its log array:
+
+```
+Program log: AnchorError thrown in programs/pump-amm/src/instructions/swap/buy.rs:687. Error Code: BuySlippageBelowMinBaseAmountOut. Error Number: 6040. Error Message: buy: slippage - would buy less tokens than expected min_base_amount_out.
+```
+
+The program self-reports that it is Anchor, names the error, gives its number —
+which matches `err.Custom` — and gives its message. It also emits
+`Program log: Instruction: BuyExactQuoteIn`, Anchor's instruction-name
+convention.
+
+`tests/golden/04-anchor-framework-error` — program
+`Prism8hsRo6Ww5jiN5Zeh3YDPLZHqHduCPSAV7JF7qv`, `err: {Custom: 5000}` — contains
+**no** `AnchorError` line at all. It logs
+`Program log: No profitable buy/sell pair was found.` and then
+`failed: custom program error: 0x1388`. Nothing attests that Prism is an Anchor
+program, and the domain meaning the log clearly intends is unrelated to whatever
+Anchor defines at 5000. This is the collision case, and it is real recorded data
+rather than a hypothetical.
+
+**The evidence hierarchy, strongest first.**
+
+1. **Log attestation.** An `AnchorError` line in the transaction's verbatim log
+   array whose `Error Number` equals the transaction's error code. This is the
+   strongest evidence available: the program itself named the error at execution
+   time, and the line carries the error name and message directly — so the
+   framework table is not even needed to produce a message. Two log shapes must
+   be recognized, the thrown form and the account-constraint form:
+
+   ```
+   AnchorError thrown in <file>:<line>. Error Code: <Name>. Error Number: <n>. Error Message: <msg>.
+   AnchorError caused by account: <name>. Error Code: <Name>. Error Number: <n>. Error Message: <msg>.
+   ```
+
+2. **A loaded Anchor IDL for the raising program's ID.** Direct evidence that the
+   program is Anchor, and for user-defined codes it also supplies the `errors`
+   array. Weaker than log attestation in one specific respect worth recording:
+   an IDL is a static artifact that may be stale, or may describe a different
+   deployed version of the program, whereas a log line is what the program
+   actually emitted during this very execution.
+
+3. **No attestation.** The code merely falls in a band some framework uses. This
+   is not evidence about the program, and it must not license a framework lookup
+   presented as fact.
+
+**Tier 1 is available in v1, and this is why.** Attestation by code match does
+**not** require per-line log attribution. The error code is itself the join key:
+the resolver scans the verbatim `LogReport.messages` array for an `AnchorError`
+line whose `Error Number` equals the error code. That is a global scan over an
+array v1 already captures in full under Requirement 21.1. It does not need
+Requirement 21.2's marker-based attribution, which stays in Phase 2. Stating this
+explicitly matters, because it is the reason the strongest evidence tier ships in
+v1 rather than being deferred along with attribution.
+
+**Confidence and outcome per tier.**
+
+| Evidence | Outcome |
+| --- | --- |
+| Tier 1 — matching `AnchorError` log line | Resolve, namespace `anchor-framework` (or `anchor-user` for codes ≥ 6000), `full` confidence, `attestation: 'anchor-error-log'`. Name and message come from the log line verbatim. |
+| Tier 2 — loaded IDL for the raising program | Resolve, same namespace selection, `full` confidence, `attestation: 'idl'`. Message comes from the IDL `errors` array for codes ≥ 6000, or from the framework table for 2000–5999. |
+| Tier 3 — no attestation | Do not claim the framework meaning. Emit the `unresolved` variant carrying the numeric code, no message, `raw` confidence, reason `unattested-namespace`. |
+
+**Why tier 3 yields `raw` rather than a hedged `partial` guess.** In practice a
+genuine Anchor framework error nearly always self-attests, because Anchor's own
+error machinery emits the `AnchorError` log line — including for constraint
+violations, which is what the `caused by account` shape above exists to carry. An
+unattested code sitting in the Anchor band is therefore more likely to be a
+non-Anchor program's private enum than a silent Anchor error. Reporting
+"possibly Anchor framework 5000" for the `04` case would be *worse* than
+reporting the raw code: the verbatim log array already contains the true answer
+(`No profitable buy/sell pair was found.`), and a speculative framework gloss
+would compete with it for the reader's attention. A hedge is not free when a
+correct answer is sitting adjacent to it on screen.
+
+**Why the program-specific tables are not subject to this rule.** The same
+reasoning about inference applies to System Program, SPL Token, and SPL ATA, and
+they come out differently: each is identified by a fixed, well-known program ID,
+so "is this the SPL Token program" is a *fact* checked by address equality, not
+an inference from a number. Requirement 6.8's rule that the failing
+instruction's program ID selects the namespace is exactly what makes those
+lookups sound, and their attestation value is `'program-id'`. Anchor is the odd
+one out precisely because "is this an Anchor program" has no address to check —
+Anchor is a framework many programs are built with, not a program deployed at
+one address.
 
 ### `resolve/logs.ts` — log capture (v1) and log attribution (Phase 2)
 
@@ -1231,8 +1345,42 @@ export type UnresolvedErrorReason =
   | 'no-idl'
   /** Absent from the table that governs it. Requirement 6.6, 6.10. */
   | 'not-in-table'
+  /**
+   * The code falls in a range some framework uses, but nothing in the response
+   * attests that the raising program is that framework, so no table governs it.
+   * See "Anchor attestation" in the errorResolver section. Requirement 6.11.
+   */
+  | 'unattested-namespace'
   /** Not parseable as an integer. Requirement 6.9. */
   | 'unparseable-code';
+
+/**
+ * How the namespace of a resolved error was established. Recorded so that a
+ * reviewer reading an `expected.json` can see whether a framework resolution
+ * rested on the program saying so or on a local artifact; golden files pin it.
+ */
+export type ErrorAttestation =
+  /**
+   * The namespace follows from the failing instruction's program ID by address
+   * equality against a well-known program. A fact, not an inference.
+   * Requirement 6.3, 6.8.
+   */
+  | 'program-id'
+  /**
+   * An `AnchorError` log line in the verbatim log array reported an
+   * `Error Number` equal to this code. Strongest tier: the program named the
+   * error during this execution, and `name` and `message` below are taken from
+   * that log line verbatim rather than from a table. Requirement 21.1.
+   */
+  | 'anchor-error-log'
+  /**
+   * A loaded Anchor IDL exists for the raising program's ID. Weaker than a log
+   * line, since an IDL is static and may be stale or describe another deployed
+   * version. The framework table is consulted only on this tier — that is, when
+   * an IDL attests the program but no matching log line is present.
+   * Requirement 18.
+   */
+  | 'idl';
 
 export type ResolvedError =
   | {
@@ -1241,6 +1389,8 @@ export type ResolvedError =
       readonly namespace: ErrorNamespace;
       readonly name: string;
       readonly message: string;
+      /** What established the namespace. See ErrorAttestation. */
+      readonly attestation: ErrorAttestation;
       readonly programId: Base58Address | null;
       readonly confidence: 'full';
     }
@@ -1609,30 +1759,48 @@ the pipeline.
 
 **Validates: Requirements 5.3**
 
-### Property 17: Error namespace selection is by table membership, never by numeric range
+### Property 17: Error namespace selection is by attested table membership, never by numeric range
 
 *For any* pair of a known program (System Program, SPL Token, SPL Associated
 Token Account) and an arbitrary integer code below 2000, resolution succeeds with
 that program's namespace if and only if the code is a member of that program's
 error table; a code present only in a different known program's table resolves as
-the `unresolved` variant. *For any* code in 2000–5999 present in the Anchor
-framework table, the namespace is `anchor-framework`. *For any* code ≥ 6000 with
-an IDL loaded for the failing program that declares it, the namespace is
-`anchor-user` and the message equals the IDL's message exactly. In every resolved
-case both the numeric code and a non-empty message are present, and the namespace
-is always chosen using the failing instruction's program ID.
+the `unresolved` variant. *For any* code in 2000–5999 and *for any* attestation
+state, resolution claims the `anchor-framework` namespace if and only if the
+response attests that the raising program is Anchor — either a matching
+`AnchorError` log line or a loaded IDL for the failing program ID — and when it
+does, the `attestation` field records which of those two tiers established it.
+*For any* code in 2000–5999 with neither form of attestation, the outcome is the
+`unresolved` variant: no namespace is claimed, the serialized object carries no
+`namespace` key, and no `anchor-framework` value appears anywhere in it. *For
+any* code ≥ 6000 with attestation present and an IDL loaded for the failing
+program that declares that code, the namespace is `anchor-user` and the message
+equals the IDL's message exactly; *for any* code ≥ 6000 with no attestation, the
+outcome is the `unresolved` variant and no namespace is claimed. *For any*
+resolution whose attestation is a matching `AnchorError` log line, `name` and
+`message` equal the error name and error message parsed from that line verbatim,
+and `attestation` is `'anchor-error-log'`. In every resolved case both the
+numeric code and a non-empty message are present, and the namespace is always
+chosen using the failing instruction's program ID.
 
-**Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.8**
+**Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.7, 6.8**
 
 ### Property 18: Unresolved errors never carry an invented message
 
 *For any* code ≥ 6000 with no IDL loaded for the failing program, the outcome is
 the `unresolved` variant with `reason: 'no-idl'`. *For any* code absent from
 every table that governs it, the outcome is `unresolved` with
-`reason: 'not-in-table'`. *For any* code representation that is not parseable as
-an integer, the outcome is `unresolved` with `reason: 'unparseable-code'` and
-`code: null`. In all three cases the serialized object has no `message` key and
-`confidence` is `'raw'`.
+`reason: 'not-in-table'`. *For any* code falling in a band some framework uses
+with nothing in the response attesting that the raising program is that
+framework, the outcome is `unresolved` with `reason: 'unattested-namespace'`, no
+`message` key, and `raw` confidence. *For any* code representation that is not
+parseable as an integer, the outcome is `unresolved` with
+`reason: 'unparseable-code'` and `code: null`. In all four cases the serialized
+object has no `message` key and `confidence` is `'raw'`. The reasons exercised by
+the clauses above cover the `UnresolvedErrorReason` union exhaustively, asserted
+by enumerating that union's members and requiring each to be produced by one of
+the clauses, so a member added to the union later without a matching clause fails
+this check rather than passing unnoticed.
 
 **Validates: Requirements 6.5, 6.6, 6.9, 6.10**
 

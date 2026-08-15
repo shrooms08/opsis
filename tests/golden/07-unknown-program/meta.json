@@ -1,0 +1,9 @@
+{
+  "case": "07-unknown-program",
+  "covers": "Honest degradation for a program with no built-in decoder, no error table, and no IDL. The failing instruction belongs to 8JyjPyw5JhWwij6SpucNUZg4baLWj6nyGgmgdJX4n9gv and raises Custom 7, so error resolution finds no table that governs the code and yields the unresolved variant with reason not-in-table and raw confidence, carrying no message. The same program has no decoder either, so its instruction decodes as Unknown with raw confidence and its payload preserved as hex (Req 4.3, 11.1) — the behavior this directory name is for. The run still exits normally.",
+  "cluster": "mainnet-beta",
+  "recordedOn": "2026-08-15",
+  "signature": "3Pyx763LzZFMszCXgRoAhYByJ6vDyeSmhkzb16hmuUTRw9r9LLDaysydsjHHNecZiHakzJW7Cb9WekRySbL4xPd",
+  "outcome": "failed",
+  "recordingNote": "Recorded by enumerating signatures for the SPL Token program address TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA with outcome 'failed' and no --failing-program filter. The program that actually failed is therefore incidental to how this case was found rather than chosen: SPL Token appears only in meta.loadedAddresses.readonly and owns no instruction in this transaction. The directory was originally named 03-spl-token-error on the assumption that enumerating a program address selects that program's failures, which it does not. Re-record with --failing-program to choose the failing program deliberately."
+}

@@ -1,0 +1,9 @@
+{
+  "case": "01-success-cpi-heavy",
+  "covers": "Three claims pinned by one recorded transaction. (1) A successful CPI-heavy transaction whose innerInstructions reach stackHeight 3, so the instruction tree has genuine depth below the top level, with failed false on every node at every depth, failure null, and exit code 0 (Req 3.2, 3.3, 3.4, 22.1). (2) A v0 message carrying 7 writable and 15 readonly lookup-table addresses, pinning the effective key list ordering static ++ loadedWritable ++ loadedReadonly, lookup-table origin marking, and signer false on every lookup-table address (Req 19.3, 7.5-7.7). (3) Token balances spanning two mints at decimals 6 and 9, so the per-mint decimals value must drive rendering rather than a fixed scale (Req 20.2-20.4, 12.11). Not covered: the transaction has no created and no closed token account, so the Req 20.5 and 20.6 token-account lifecycle branches remain unpinned by it.",
+  "recordingNote": "This fixture originally had two duplicate siblings, 05-v0-lookup-tables and 08-token-deltas-mixed-decimals, recorded from this same signature because one transaction satisfied all three search predicates and the recorder wrote the identical response under all three names. The duplicates were deleted and their claims folded here, so one recording now pins three distinct behaviors. Consequence: because the three claims share one transaction, a change to this response affects all three at once, and if any claim later needs an independent example it must be recorded separately.",
+  "cluster": "mainnet-beta",
+  "recordedOn": "2026-08-15",
+  "signature": "5htUvgnugDJHSwsoZUxiAJifCXjBUtNMJnjU5MPD8KokhwVNrpZkoSqk4E1kTL4WfjGsSYwndyNwfSedKG8ipkTA",
+  "outcome": "succeeded"
+}

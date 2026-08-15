@@ -319,6 +319,9 @@ a coverage table so each of the three is traceable to exactly one task.
       transaction with several levels of CPI: the success path end to end, built-in
       decode, lamport deltas, instruction tree shape at depth, `failed: false`
       everywhere, exit 0. It replaces a flat System-transfer success case
+    - `05-v0-lookup-tables` and `08-token-deltas-mixed-decimals` were folded into
+      `01-success-cpi-heavy` because one recorded transaction satisfied all three
+      predicates, so the recorded set is smaller than the nine originally planned
     - `02-anchor-user-error` — **pinned**, filter `'failed'`. A `0x1771`-class
       error resolvable through a local IDL to a named message; the headline use case
     - `03-spl-token-error` — **pinned**, filter `'failed'`. Namespace selection by

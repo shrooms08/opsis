@@ -1,0 +1,8 @@
+{
+  "case": "02-anchor-user-error",
+  "covers": "Anchor user-defined error: Custom 6040 (>= 6000) raised by pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA, resolved through that program's local Anchor IDL to a named message with namespace anchor-user (Req 6.1). Requires the pAMM IDL in --idl-dir; with no IDL loaded it must degrade to unresolved with reason no-idl and raw confidence (Req 6.5).",
+  "cluster": "mainnet-beta",
+  "recordedOn": "2026-08-15",
+  "signature": "4MqxZnZ3VXjTK1zARqA5Z6k4MupZkHESTM7kJX3itwc7NLWWZAbdpeKiwcYrRRPPtT4hDYr8W34WmAFKpmK4Gfwj",
+  "outcome": "failed"
+}
