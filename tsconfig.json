@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    /* Node 20 runtime target. Node 20 covers all of ES2022. */
+    "target": "ES2022",
+    "lib": ["ES2022"],
+
+    /* ES modules, resolved the way Node resolves them. */
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "moduleDetection": "force",
+    "verbatimModuleSyntax": true,
+
+    /* Strict mode, plus the checks strict does not turn on. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+
+    /* This config type-checks the whole repo. Emit lives in
+       tsconfig.build.json, which ships only src/ to dist/. */
+    "noEmit": true
+  },
+  "include": ["src", "tests", "scripts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

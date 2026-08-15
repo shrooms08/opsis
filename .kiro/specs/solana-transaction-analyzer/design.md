@@ -79,9 +79,11 @@ flowchart TD
     subgraph resolve["resolve — pure functions, no I/O"]
         registry --> failure["failure.ts<br/>InstructionError → top-level index<br/>Req 5.1-5.4"]
         failure --> errors["errorResolver.ts<br/>namespace by table membership<br/>Req 6"]
-        errors --> logs["logs.ts<br/>invoke/success scope tracking<br/>CPI attribution = partial<br/>Req 21, 5.5"]
+        errors --> logs["logs.ts — v1<br/>verbatim logMessages copy<br/>present / truncated only<br/>Req 21.1, 21.5, 21.6"]
+        logs -. "deferred" .-> assoc["logs.ts — Phase 2<br/>invoke/success scope stack at every depth<br/>per-line attribution, CPI attribution<br/>Req 21.2-21.4, 5.5"]
         logs --> bal["balances.ts + tokenBalances.ts<br/>bigint deltas → decimal strings<br/>Req 7.8-7.10, 20"]
-        bal --> cu["compute.ts<br/>per-instruction + total<br/>Req 8"]
+        bal --> cu["compute.ts<br/>total verbatim from meta<br/>top-level per-instruction from depth-1 markers<br/>Req 8"]
+        logs -. "depth-1 scopes only" .-> cu
     end
 
     cu --> assemble["assemble.ts<br/>sorted, integer-only, no timestamps<br/>Req 9"]
@@ -443,17 +445,42 @@ Tables live in `resolve/tables/` as plain frozen objects, one file per
 namespace: `anchorFramework.ts`, `systemProgram.ts`, `splToken.ts`,
 `splAssociatedTokenAccount.ts`.
 
-### `resolve/logs.ts` — log attributor
+### `resolve/logs.ts` — log capture (v1) and log attribution (Phase 2)
 
-Satisfies Requirement 21, and feeds Requirement 5.5.
+This module has two halves, and only the first ships in v1.
 
-Walks `meta.logMessages`, opening an instruction scope on an
+**v1 — verbatim capture.** Satisfies Requirements 21.1, 21.5, 21.6.
+
+```ts
+export function captureLogs(response: RawTransactionResponse): LogReport;
+```
+
+`captureLogs` copies `meta.logMessages` into `LogReport.messages` as an ordered
+array, in RPC order, unchanged. No parsing, no per-line marker, no association to
+any instruction. It additionally determines two facts about the collection:
+`present` is false when the field is absent (Req 21.6), and `truncated` is true
+when the metadata indicates the log array was cut short (Req 21.5). The
+collection-level `confidence` follows from those two facts: `full` when present
+and not truncated, `partial` when present and truncated, `raw` when absent.
+
+The reason verbatim capture is in v1 rather than deferred is that Anchor programs
+emit the resolved error message directly into the log stream, so on a failed
+transaction the log array is frequently the single most informative artifact in
+the entire response. Dropping it would contradict the product thesis in
+product.md: the tool exists to surface what is already there, not to withhold it
+pending a nicer presentation.
+
+**Phase 2 — per-line attribution.** Requirements 21.2, 21.3, 21.4, and 5.5.
+
+The attributor walks `meta.logMessages`, opening an instruction scope on a
 `Program <id> invoke [n]` marker and closing it on the matching `success`
 marker, maintaining a stack (Req 21.2). Every attribution produced this way is
 `partial` (Req 21.3) — the markers are a strong signal but they are text emitted
-by programs, not a structured guarantee.
+by programs, not a structured guarantee. Messages that cannot be placed go to
+`unattributed` (Req 21.4) rather than being force-fit to the nearest instruction.
 
 ```ts
+// Phase 2.
 export interface LogAttribution {
   readonly byInstructionOrder: ReadonlyMap<number, readonly AttributedLog[]>;
   readonly unattributed: readonly string[];
@@ -467,12 +494,37 @@ export function attributeLogs(
 ): LogAttribution;
 ```
 
-Messages that cannot be placed go to `unattributed` (Req 21.4) rather than being
-force-fit to the nearest instruction. A truncation marker sets `truncated` and
-`partial` confidence on the collection (Req 21.5). An absent `logMessages` field
-yields an empty collection with `raw` confidence (Req 21.6). The
-`ReadonlyMap` exists only inside this module; `assemble.ts` flattens it into
-arrays on the nodes, because `Analysis` contains no `Map`.
+The `ReadonlyMap` exists only inside this module; `assemble.ts` will flatten it
+into arrays on the nodes, because `Analysis` contains no `Map`. In v1,
+`InstructionNode.logs` is empty on every node and `LogReport.unattributed` is
+empty, since nothing is attributed yet and the verbatim array already carries
+every message.
+
+**One narrow exception crosses that line, deliberately.** `analyze/compute.ts`
+needs depth-1 scope boundaries to attribute top-level compute units, so v1 does
+contain a log-sequence walker. It lives here, and it is written as a general
+scope walker rather than as a compute-specific scanner, so that Phase 2 extends
+it instead of replacing it:
+
+```ts
+export interface LogScope {
+  /** Invoke depth from the `invoke [n]` marker; 1 for a top-level invocation. */
+  readonly depth: number;
+  readonly programId: Base58Address;
+  /** Index of the `invoke [n]` line in the messages array. */
+  readonly openIndex: number;
+  /** Index of the terminating success or failure line, or null if unbalanced. */
+  readonly closeIndex: number | null;
+  readonly lineIndices: readonly number[];
+}
+
+export function walkLogScopes(messages: readonly string[]): readonly LogScope[];
+```
+
+v1 consumes only the `depth === 1` scopes, and only to read compute values out of
+them. It does not use `lineIndices` to attach lines to nodes. Phase 2 consumes
+scopes at every depth and does. The tension in shipping half of this walker is
+recorded in the `analyze/compute.ts` section below.
 
 ### `analyze/balances.ts` — lamport balance deltas
 
@@ -509,16 +561,74 @@ order the RPC happened to list them (Req 9.2, 9.6).
 Satisfies Requirement 8, including the requirement that both per-instruction and
 total values appear in `Analysis` (Req 8.3).
 
-Per-instruction units come from the `consumed N of M compute units` log line
-attributed to that instruction; the total comes from
-`meta.computeUnitsConsumed`. Unavailable data yields the `available: false`
-variant carrying `raw` confidence rather than a zero (Req 8.2), while a genuine
-zero is reported as `0` (Req 8.4).
+The transaction total comes from `meta.computeUnitsConsumed`, verbatim.
+
+Per-instruction units are available in v1 for **top-level instructions only**.
+The mechanism is narrow and specific:
+
+1. Run `walkLogScopes` from `resolve/logs.ts` and keep the scopes at
+   `depth === 1` — the `Program <id> invoke [1]` markers. Each opens a top-level
+   invocation scope that closes at its matching `Program <id> success` or failure
+   marker.
+2. Within each scope, take the `consumed N of M compute units` line that precedes
+   the terminating marker. That line reports the units consumed by the top-level
+   invocation as a whole.
+3. Attribute those values to the top-level instructions in order: the k-th
+   depth-1 scope supplies the value for the k-th node at depth 0.
+
+Step 3 is only sound when the depth-1 scope count equals the top-level
+instruction count. When it does not — an unbalanced marker sequence, a truncated
+log array — the alignment is unknowable, and every top-level node reports
+`available: false` rather than taking a positional guess. Attributing a real
+number to the wrong instruction is worse than reporting no number, because the
+wrong number is indistinguishable from a right one.
+
+Nested instructions report the `available: false` variant with `raw` confidence.
+That is not missing data of unknown cause — it is the Phase 2 per-line
+attribution deferral, named as such, and a reader sees explicitly that the value
+was not attributed rather than seeing a misleading zero. A genuine zero is
+reported as `0` (Req 8.4), which is why the `available: false` variant carries no
+`value` key at all (Req 8.2).
 
 The total is taken verbatim from metadata and is **not** cross-checked against
 the sum of per-instruction values (Req 8.5). Transaction-level overhead is not
 attributed to any instruction, so the total is not expected to equal the sum,
-and asserting otherwise would produce false failures on correct data.
+and asserting otherwise would produce false failures on correct data. This holds
+with equal force now that per-instruction values exist for the top level: the
+top-level values are a subset of the accounted work, so they sum to less than the
+total by construction.
+
+#### The tension this creates, stated plainly
+
+Extracting top-level compute values requires tracking depth-1 invoke markers and
+pairing each with its terminating marker. That is a narrow form of exactly the
+log-to-instruction association that Phase 2 still defers. Three consequences
+follow, and none of them should be buried.
+
+**v1 does parse the log sequence.** It parses only to a depth-1 scope boundary,
+and only to extract compute values. It does not attach arbitrary log lines to
+arbitrary instructions, and `InstructionNode.logs` stays empty. The verbatim
+array in `LogReport.messages` is the whole of v1's log output.
+
+**The deferred work is a generalization of machinery v1 already contains.** The
+Phase 2 item is therefore smaller than its description suggests: full attribution
+is the same walk with the stack maintained at every depth instead of only at
+depth 1, and with lines collected into scopes instead of only compute values
+being read out of them. The v1 walker must be written with that in mind — depth
+tracking exposed as a reusable scope walker, not hard-coded to look for one line
+shape at one depth. A compute-special-cased parser would have to be thrown away
+and rewritten in Phase 2, which is the outcome to avoid.
+
+**The failure mode is silent misattribution.** If the depth-1 pairing is wrong —
+a program that emits its own text resembling a marker, a nested invocation
+mistaken for a top-level one — a compute value lands on the wrong instruction,
+and the output looks entirely plausible on screen. Nothing about a number in the
+right shape and range signals that it came from the neighbouring instruction. The
+count check above catches the case where the mispairing changes the scope count,
+but not a mispairing that preserves it. The mitigation is that golden fixtures pin
+the per-instruction compute value for every top-level instruction, so a
+misattribution shifts a value between adjacent nodes and fails a golden test
+rather than shipping silently.
 
 ### `analyze/assemble.ts` — Analysis assembly
 
@@ -630,12 +740,20 @@ here because the fixtures it writes are a contract of the test strategy, and a
 reviewer should be able to see exactly what produced them.
 
 It walks `getSignaturesForAddress` for a given program address, pages through the
-results, keeps only entries whose `err` field is non-null, fetches each with
-`getTransaction`, and writes two files per case: the verbatim response to
+results, keeps the entries selected by an explicit outcome filter, fetches each
+with `getTransaction`, and writes two files per case: the verbatim response to
 `fixtures/<name>/input.json`, and a `meta.json` alongside it recording what the
-case covers, the cluster it was recorded from, and the date it was recorded.
+case covers, the outcome filter that selected it, the cluster it was recorded
+from, and the date it was recorded.
 
 ```ts
+/**
+ * Which candidate signatures to keep, judged on the `err` field of the
+ * getSignaturesForAddress entry: 'failed' keeps non-null err, 'succeeded' keeps
+ * null err, 'any' keeps everything.
+ */
+export type OutcomeFilter = 'failed' | 'succeeded' | 'any';
+
 export interface RecordOptions {
   readonly programAddress: Base58Address;
   readonly rpcUrl: string;
@@ -650,6 +768,8 @@ export interface RecordOptions {
   readonly covers: string;
   /** ISO date, supplied by the caller rather than read from a clock. */
   readonly recordedOn: string;
+  /** Explicit, never inferred. 'failed' is the ordinary choice. */
+  readonly outcome: OutcomeFilter;
 }
 
 /** Serialized to <outDir>/<caseName>/meta.json. Never read by the pipeline. */
@@ -659,6 +779,8 @@ export interface FixtureMeta {
   readonly cluster: RecordOptions['cluster'];
   readonly recordedOn: string;
   readonly signature: Base58Signature;
+  /** The filter that selected this case, so it can be re-recorded identically. */
+  readonly outcome: OutcomeFilter;
 }
 
 export interface RecordedFixture {
@@ -667,19 +789,35 @@ export interface RecordedFixture {
   readonly metaPath: string;
 }
 
-export async function recordFailedTransactions(
+export async function recordTransactions(
   options: RecordOptions,
 ): Promise<readonly RecordedFixture[]>;
 ```
 
+`outcome` has no default at the type level, so every invocation states which
+class of transaction it wants. In practice the answer is `'failed'` almost every
+time: failure analysis is the primary use case and most of the fixture set is
+failures. The exception is load-bearing. Fixture `01-success-cpi-heavy` is a
+successful transaction, recorded with `'succeeded'`, and it pins the success path,
+the instruction tree shape at depth, `failed: false` on every node, and exit code
+0. A failures-only recorder could not have produced it — which is why the filter
+exists rather than the `err`-non-null test being hard-coded. `'any'` is there for
+recording a case where the outcome is not the selection criterion.
+
+The exported function is named `recordTransactions` rather than
+`recordFailedTransactions`, because the name should not contradict the filter it
+accepts.
+
 `meta.json` is documentation for the next maintainer. Nothing in `src/` reads it,
-so it cannot influence `Analysis` and cannot affect a golden comparison. The
+so it cannot influence `Analysis` and cannot affect a golden comparison. Recording
+the outcome filter alongside the signature is what lets a later maintainer
+re-record a case identically instead of guessing which class it came from. The
 recording date is passed in rather than read from a clock, which keeps the script
 free of a time dependency and keeps the written bytes reproducible for a given
 invocation.
 
 Four constraints govern this script, and each is a deliberate decision rather
-than an accident of layout.
+than an accident of layout. The outcome filter changes none of them.
 
 **It lives outside `src/`, under `scripts/`.** Two concrete reasons. First, the
 Requirement 15 read-only AST guard scans `src/`, and the recorder is not part of
@@ -713,7 +851,10 @@ checking the read-only claim should understand the recorder as read-only by
 inspection — it is two RPC read calls and two file writes, and nothing else.
 Both `getSignaturesForAddress` and `getTransaction` are read-only RPC methods,
 so the recorder introduces no new capability class beyond what the CLI already
-uses.
+uses. That holds for every setting of the outcome filter: the filter is a
+predicate applied to results already returned by `getSignaturesForAddress`, so
+selecting successful transactions instead of failed ones changes which responses
+are written to disk and nothing about which RPC methods are called.
 
 ---
 
@@ -1026,6 +1167,11 @@ export type ComputeUnits =
   | { readonly available: true; readonly value: number; readonly confidence: 'full' }
   | { readonly available: false; readonly confidence: 'raw' };
 
+/**
+ * One log line attached to the instruction that emitted it. Produced by the
+ * Phase 2 attributor only; no value of this type is constructed in v1, where
+ * the verbatim array on LogReport is the whole of the log output.
+ */
 export interface AttributedLog {
   /** Position in the original logMessages array. */
   readonly index: number;
@@ -1057,7 +1203,13 @@ export interface InstructionNode {
   readonly valid: boolean;
   /** Names the unresolved program index when valid is false. Requirement 3.7. */
   readonly invalidReason: string | null;
+  /**
+   * Populated for top-level nodes in v1 from the depth-1 invoke scopes; the
+   * `available: false` variant on nested nodes reflects the Phase 2 per-line
+   * attribution deferral, not absent RPC data. Requirement 8.1, 8.2.
+   */
   readonly computeUnits: ComputeUnits;
+  /** Phase 2 attribution output. Empty on every node in v1. Req 21.2. */
   readonly logs: readonly AttributedLog[];
   readonly inner: readonly InstructionNode[];
   readonly confidence: Confidence;
@@ -1203,12 +1355,30 @@ export interface ComputeReport {
 }
 
 export interface LogReport {
+  /**
+   * meta.logMessages, copied verbatim in RPC order. No parsing is applied and
+   * no line is rewritten, reordered, filtered, or marked. Empty when the field
+   * was absent. Requirement 21.1.
+   */
+  readonly messages: readonly string[];
   /** False when logMessages was absent. Requirement 21.6. */
   readonly present: boolean;
   /** Requirement 21.5. */
   readonly truncated: boolean;
-  /** Messages that could not be placed. Requirement 21.4. */
+  /**
+   * Messages that could not be placed by per-line attribution. Empty in v1,
+   * where nothing is attributed and `messages` already holds every line; that
+   * emptiness is the deferral, not a defect. Requirement 21.4.
+   */
   readonly unattributed: readonly string[];
+  /**
+   * Completeness of the COLLECTION, not of any individual line: `full` when
+   * present and not truncated, `partial` when present and truncated
+   * (Req 21.5), `raw` when absent (Req 21.6). Property 13 enumerates the log
+   * report among the elements that must carry a marker, so the field is not
+   * optional. Individual messages carry no marker because a verbatim copy
+   * makes no claim that could be partial.
+   */
   readonly confidence: Confidence;
 }
 ```
@@ -1261,7 +1431,7 @@ Testing Strategy.
 
 ### Property 1: Signature encoding round-trips for exactly the 64-byte case
 
-**v1-essential**
+**Phase 2**
 
 *For any* 64-byte buffer `b`, `validateSignature(base58Encode(b))` succeeds and
 the accepted signature base58-decodes back to `b` exactly.
@@ -1270,7 +1440,7 @@ the accepted signature base58-decodes back to `b` exactly.
 
 ### Property 2: Signature rejection is exhaustive over both failure modes
 
-**v1-essential**
+**Phase 2**
 
 *For any* byte buffer whose length is not 64, `validateSignature` of its base58
 encoding fails with `kind: 'wrong-length'` reporting the true byte length; and
@@ -1386,7 +1556,7 @@ reason.
 
 ### Property 13: Every decoded element carries a confidence marker
 
-**v1-essential**
+**Phase 2**
 
 *For any* `Analysis` value, walking it recursively yields no decoded element —
 instruction decode, account entry, account reference, resolved error, CPI
@@ -1406,7 +1576,7 @@ exists in the tree.
 
 ### Property 45: Confidence aggregation is monotonically non-increasing
 
-**v1-essential**
+**Phase 2**
 
 *For any* `Analysis` value and *for any* container node within it — an
 instruction node, the log report, or the root — that node's `confidence` is less
@@ -1480,7 +1650,7 @@ the recorded `messageVersion` matches the message's version.
 
 ### Property 20: Account roles follow origin, and lookup-table addresses are never signers
 
-**v1-essential**
+**Phase 2**
 
 *For any* message header and any static and loaded key lists: every entry with
 `origin.kind === 'static'` has `signer` and `role` derived from the header
@@ -1699,7 +1869,7 @@ is set or `TERM` indicates a color-capable terminal; otherwise disabled.
 
 ### Property 40: JSON rendering round-trips the Analysis object
 
-**v1-essential**
+**Phase 2**
 
 *For any* `Analysis` value, including one containing non-ASCII strings in log
 messages and resolved names, `JSON.parse(renderJson(a))` is deep-equal to `a`
@@ -1711,7 +1881,7 @@ reformatting in the JSON path.
 
 ### Property 41: Rendering does not mutate the Analysis object
 
-**v1-essential**
+**Phase 2**
 
 *For any* `Analysis` value, the canonical serialization taken before rendering
 equals the one taken after rendering as text and then as JSON, and rendering in
@@ -1736,7 +1906,7 @@ a decimal string, or of `null` to an absent key.
 
 ### Property 43: The exit code mapping is total and correct
 
-**v1-essential**
+**Phase 2**
 
 *For any* program outcome, `exitCodeFor` returns exactly one code and the mapping
 is total: `0` when the analysis completed and the transaction succeeded on chain;
@@ -1750,7 +1920,7 @@ non-existent transaction, and a fixture that fails to load.
 
 ### Property 44: Stream discipline holds on every path
 
-**v1-essential**
+**Phase 2**
 
 *For any* program outcome, stdout is empty unless the outcome is a rendered
 analysis, a `--version` request, or a `--help` request; and every diagnostic,
@@ -1786,8 +1956,9 @@ stream.
 | Instruction payload undecodable | `decode/registry.ts` | — | in-object | `raw` confidence, bytes preserved | 3.5, 11.7 |
 | Program ID unresolvable | `decode/instructionTree.ts` | — | in-object | `valid: false` with a reason | 3.7 |
 | Error code unresolvable | `resolve/errorResolver.ts` | — | in-object | `raw` confidence, numeric code only | 6.5, 6.6, 6.9, 6.10 |
-| Compute data unavailable | `analyze/compute.ts` | — | in-object | `available: false`, `raw` confidence | 8.2 |
-| `logMessages` absent | `resolve/logs.ts` | — | in-object | empty collection, `raw` confidence | 21.6 |
+| Compute data unattributable — nested instruction, no consumed-units line, or depth-1 scope count not matching the top-level instruction count | `analyze/compute.ts` | — | in-object | `available: false`, `raw` confidence | 8.2 |
+| `logMessages` absent | `resolve/logs.ts` | — | in-object | empty `messages`, `present: false`, `raw` confidence | 21.6 |
+| `logMessages` truncated | `resolve/logs.ts` | — | in-object | verbatim `messages` as far as they go, `truncated: true`, `partial` confidence | 21.5 |
 | Token balance arrays absent | `analyze/tokenBalances.ts` | — | in-object | empty collection | 20.9 |
 | `loadedAddresses` absent on v0 | `decode/accountKeys.ts` | — | in-object | affected refs `unresolved`, `raw` confidence | 19.6 |
 | Text render of malformed object | `render/text.ts` | 2 † | stderr | rendering failure | 12.7 |
@@ -1835,17 +2006,18 @@ wallet. Every choice below serves that.
 fixtures/
   <signature>.json              # verbatim RPC response, used by FixtureSource at runtime
 tests/
-  golden/
-    01-success-system-transfer/
+  golden/                       # 9 recorded, 6 pinned in v1
+    01-success-cpi-heavy/       # pinned
       input.json                # verbatim recorded RPC response
       expected.json             # canonical serialization of the Analysis
-    02-anchor-user-error/
-    03-spl-token-error/
-    04-unknown-program/
-    05-v0-lookup-tables/
-    06-nested-cpi-failure/
-    07-partial-decode/
-    08-token-deltas-mixed-decimals/
+    02-anchor-user-error/       # pinned
+    03-spl-token-error/         # pinned
+    04-anchor-framework-error/  # pinned
+    05-v0-lookup-tables/        # pinned
+    06-nested-cpi-failure/      # pinned
+    07-unknown-program/         # recorded, expected.json not yet written
+    08-token-deltas-mixed-decimals/  # recorded, expected.json not yet written
+    09-partial-decode/          # recorded, expected.json not yet written
   properties/                   # fast-check properties 1-45
   unit/                         # examples, edge cases, decision tables
   guard/
@@ -1854,21 +2026,59 @@ tests/
 
 ### Golden tests
 
-The harness scans `tests/golden/` for subdirectories containing both
-`input.json` and `expected.json` (Req 14.1), sorted by directory name so
-discovery order is deterministic. For each, it parses `input.json` as the RPC
-response, runs the real pipeline end to end, canonically serializes the result,
-and compares against `expected.json` (Req 14.2, 14.4, 14.6, 14.7). A missing or
-invalid file on either side fails that fixture naming the path and the parse
-error (Req 14.3, 14.5). A mismatch reports the fixture name, the differing JSON
-pointer paths, and both values (Req 14.8). Any single fixture failure fails the
-suite (Req 14.9, 14.11).
+The harness discovers every subdirectory of `tests/golden/` that contains an
+`input.json` (Req 14.1), sorted by directory name so discovery order is
+deterministic. Presence of `expected.json` determines the outcome, not whether
+the directory is discovered:
+
+- **Both files present** → the case is compared. The harness parses
+  `input.json` as the RPC response, runs the real pipeline end to end,
+  canonically serializes the result, and compares against `expected.json`
+  (Req 14.2, 14.4, 14.6, 14.7). The case passes or fails on that comparison. A
+  mismatch reports the fixture name, the differing JSON pointer paths, and both
+  values (Req 14.8).
+- **`input.json` present, `expected.json` absent** → the case is reported as
+  `pending`, counted, and printed by name. **Pending is not a pass and is not a
+  skip.** This is what lets a case be recorded before it is pinned.
+- **`input.json` absent or unparseable** → that case fails, naming the path and
+  the parse error (Req 14.3).
+- **`expected.json` present but unparseable** → that case fails, naming the path
+  and the parse error (Req 14.5).
+
+Any single fixture failure fails the suite (Req 14.9, 14.11).
+
+Discovery keys on `input.json` alone, rather than on both files, because a
+skipped directory is indistinguishable from an absent one: a forgotten or
+misnamed `expected.json` would look exactly like a case that was never recorded.
+Counting and printing a `pending` state makes the omission visible in every test
+run instead of passing over it silently — the same reasoning this design applies
+in refusing to let a partial decode read as complete.
+
+The pinned set is carried in the harness as an explicit list of the six pinned
+directory names, and that list is what makes the harness strict about them: for a
+pinned fixture, a missing `expected.json` is a hard failure rather than
+`pending`, so Requirement 14.1 discovery semantics and the 14.3/14.5 file-failure
+semantics apply in full to both of its files. The three recorded-but-unpinned
+cases remain legitimately pending in v1 — an unpinned fixture is one whose ground
+truth has not been hand-reviewed yet, and reporting it as passing would be the
+dishonesty the `pending` state exists to prevent. Retiring the list, and with it
+the `pending` state, is Phase 2 work that follows from pinning the remaining
+three.
 
 **No internal module is mocked.** The only substitution is at the outermost
 seam: a `FixtureSource` reading `input.json` stands in for `RpcSource`. Both
 implement `TransactionSource`, and Property 6 asserts they are interchangeable,
 so the substitution cannot hide a defect. `decode`, `resolve`, `analyze`, and
 `render` run as they do in production.
+
+**Every `expected.json` pins the verbatim log array and the per-instruction
+compute value of every top-level instruction.** The log array costs nothing to
+pin, since it is a straight copy, and pinning it makes any accidental filtering
+or reordering fail immediately. The compute values matter more: top-level
+attribution rests on pairing depth-1 invoke markers with their terminating
+markers, and a mispairing shifts a plausible-looking number onto an adjacent
+instruction. Pinning the values per node is what turns that silent
+misattribution into a test failure.
 
 **Comparison is against the object, never terminal output.** `expected.json` is
 the canonical serialization of an `Analysis`, so a change to a color constant,
@@ -1890,31 +2100,81 @@ passing on a developer machine and failing in review. The three genuine network
 scenarios (timeout, connection refused, not-found) run against a stub server on
 `127.0.0.1` and are the only tests permitted through the interceptor.
 
-### Required fixture set
+### Recorded fixture set
 
-Each fixture exists to prove a specific claim, not to add volume.
+Nine cases are recorded. Six are pinned in v1 — meaning an `expected.json`
+exists and the golden harness compares against it. Three are recorded but not yet
+pinned: the response is committed, no `expected.json` is written yet, and the
+harness discovers them and reports them as `pending`, counted and printed by
+name. Each fixture exists to prove a specific claim, not to add volume.
+
+Pinned in v1:
 
 | Fixture | Proves |
 | --- | --- |
-| `01-success-system-transfer` | The success path end to end: built-in System decode, lamport deltas, exit 0, `failed: false` everywhere (Req 4.4, 7.8, 22.1) |
+| `01-success-cpi-heavy` | The success path end to end on a CPI-heavy transaction: instruction tree shape at depth, `failed: false` on every node, lamport deltas, exit 0 (Req 3.2, 7.8, 22.1). Recorded with the `'succeeded'` outcome filter |
 | `02-anchor-user-error` | A `0x1771`-class error resolved through a local IDL to a named message; the headline use case (Req 6.1, 18.2) |
 | `03-spl-token-error` | Namespace selection by table membership against a program-specific table, with the failing program ID choosing the table (Req 6.3, 6.8) |
-| `04-unknown-program` | Honest degradation: `Unknown`, `raw` confidence, hex payload preserved, run still exits normally (Req 4.3, 11.1) |
+| `04-anchor-framework-error` | A code in 2000–5999 resolved against the Anchor framework table, distinct from the user-error range above it (Req 6.2) |
 | `05-v0-lookup-tables` | Effective key list ordering, lookup-table origin marking, and lookup-table addresses recorded as non-signers (Req 19.3, 7.5–7.7) |
-| `06-nested-cpi-failure` | A CPI three deep where `InstructionError` names only the top-level index and the nested attribution comes from logs at `partial` confidence (Req 3.2, 5.2, 5.5, 21.2) |
-| `07-partial-decode` | A `partial` decode with `decoded_fields` populated and the unconsumed suffix in `undecodedData` (Req 11.3) |
-| `08-token-deltas-mixed-decimals` | Token deltas across three mints with different `decimals`, including one created account, one closed account, and one mint with `decimals` absent (Req 20.2–20.6, 12.11, 12.13) |
+| `06-nested-cpi-failure` | Top-level failure attribution when the failing top-level instruction has children: `InstructionError` names only a top-level index, and the correct behavior is to mark that top-level node rather than guessing at a nested frame (Req 5.2). Also pins the tree shape at depth, the verbatim log array, and the per-instruction compute value of every top-level instruction (Req 3.2, 8.1, 21.1). Its log-derived nested attribution assertion at `partial` confidence is a Phase 2 addition to the same fixture and needs no re-recording (Req 5.5, 21.2) |
+
+Recorded but not pinned:
+
+| Fixture | Will prove |
+| --- | --- |
+| `07-unknown-program` | Honest degradation: `Unknown`, `raw` confidence, hex payload preserved, run still exits normally (Req 4.3, 11.1) |
+| `08-token-deltas-mixed-decimals` | Token deltas across mints at different scales, including one created account, one closed account, and one mint with `decimals` absent (Req 20.2–20.6, 12.11, 12.13) |
+| `09-partial-decode` | The `partial` decode variant: an instruction whose name resolves while its payload carries a trailing suffix the decoder does not consume, so `decodedFields` is populated and `undecodedData` holds the unconsumed suffix at `partial` confidence (Req 11.3) |
 
 Fixtures are recorded once from mainnet and committed. Recording is a manual
 maintainer step, not part of the test run, since the test run has no network.
+Eight of the nine were recorded with the `'failed'` outcome filter and
+`01-success-cpi-heavy` with `'succeeded'`; each case's `meta.json` records which,
+so any of them can be re-recorded identically.
+
+### Known coverage gaps in v1
+
+Recorded here rather than left to be discovered.
+
+**The partial-decode case is recorded but not pinned.** `09-partial-decode` is in
+the recorded set — a transaction with an instruction whose name resolves while its
+payload carries a trailing suffix the decoder does not consume — so the gap has
+narrowed from no case existing to a case existing without an `expected.json`. The
+response is committed; authoring that one file is the whole of the remaining work,
+and no re-recording is needed. Until it is written the harness discovers the
+directory and reports it as `pending`, counted and printed,
+so Requirement 11.3 — the `partial` variant carrying decoded fields alongside the
+unconsumed suffix in `undecodedData` — is unpinned in v1. What still constrains it
+is the type system, which makes the variant unconstructable without both halves
+and pins its `confidence` to `'partial'`, plus whatever partial decodes the six
+pinned transactions happen to contain incidentally. Neither is a substitute for a
+case chosen to exercise the variant. Recording the case without pinning it is
+deliberate: a committed response the harness openly reports as `pending` states
+its own status, where an absent fixture would look like the gap had never been
+noticed.
+
+**The gap about the pinned set containing no nested failure is closed.**
+Restoring `06-nested-cpi-failure` to the pinned set closes it. Top-level
+attribution over an instruction that has children is now pinned, which was the
+specific behavior that had no coverage.
+
+**Three recorded cases are not pinned.** `07-unknown-program`,
+`08-token-deltas-mixed-decimals`, and `09-partial-decode` have committed responses
+and no `expected.json`, so honest degradation on an unknown program, token deltas
+across mixed scales, and the partial-decode variant are unpinned in v1. Writing the
+three `expected.json` files is the whole of the remaining work; no re-recording is
+needed.
 
 ### Property tests
 
 Properties 1–45 are implemented with `fast-check` under vitest, one property-based
 test per design property, each configured for a minimum of 100 iterations.
-No property-based testing machinery is written from scratch. The twelve marked
-**v1-essential** ship in v1; the rest are Phase 2, per the deferral section
-below. Each test carries a comment naming the property it implements:
+No property-based testing machinery is written from scratch. The three marked
+**v1-essential** — numbers 25, 34, and 42 — ship in v1. Everything else is Phase
+2, including the nine marked **Phase 2**, which were previously in the v1 set and
+have been deferred; see the deferral section below. Each test carries a comment
+naming the property it implements:
 
 ```ts
 // Feature: solana-transaction-analyzer, Property 25: Lamport deltas are exact
@@ -1932,8 +2192,10 @@ Generators worth naming, because a weak generator makes a property vacuous:
   which exercises Properties 8 and 9 rather than only the shallow shapes real
   transactions usually have.
 - `arbLogSequence` — includes unbalanced `invoke`/`success` markers, interleaved
-  programs, and truncation markers, so log conservation (Property 29) is tested
-  on adversarial input rather than well-formed input.
+  programs, truncation markers, and program-emitted text that resembles a marker,
+  so the scope walker is exercised on adversarial input rather than well-formed
+  input. In v1 that means the depth-1 compute pairing and its count check; in
+  Phase 2 the same generator drives log conservation, property number 29.
 - `arbTokenEntries` — deliberately includes one account holding several mints and
   one mint held by several accounts, which is the case a single-key match breaks
   on, plus `decimals` values across 0–18 and entries with `decimals` absent.
@@ -1948,8 +2210,10 @@ handle what a property cannot state: `--help` and `--version` content and their
 precedence (Req 17.1, 17.2, 17.4, 17.5, 17.7), the presence of the three
 built-in decoders (Req 4.4), pairwise distinctness of the four text colors
 (Req 12.4), section layout with color off (Req 12.1), the three text markers
-(Req 12.3), the log truncation marker (Req 21.5), the two empty-collection cases
-for absent token balances and absent logs (Req 20.9, 21.6), the version matching
+(Req 12.3), the three-way log collection confidence — `full` present and
+untruncated, `partial` truncated, `raw` absent (Req 21.5, 21.6) — element-for-element
+equality of `LogReport.messages` with `meta.logMessages` (Req 21.1), the
+empty-collection case for absent token balances (Req 20.9), the version matching
 `package.json` (Req 17.5), and harness meta-tests for fixture discovery and its
 failure reports (Req 14.1, 14.3, 14.5, 14.8, 14.11).
 
@@ -1992,9 +2256,10 @@ npm test
 
 `npm test` runs vitest once — no watch mode — over the golden fixtures, the property
 tests, the unit tests, and the read-only guard, with the network
-interceptor active. The reviewer sees every fixture named for the case it proves,
-the twelve v1-essential properties passing at 100 iterations each, and an
-explicit statement that no transaction can be constructed, signed, or sent. No
+interceptor active. The reviewer sees six pinned fixtures each named for the case
+it proves, the three recorded-but-unpinned cases reported as `pending` with their
+count printed, the three v1-essential properties passing at 100 iterations each, and
+an explicit statement that no transaction can be constructed, signed, or sent. No
 API key, no wallet, no network, no toolchain beyond Node 20.
 
 ---
@@ -2005,88 +2270,134 @@ The August 23 ship date covers the v1 surface described above. Three things are
 explicitly out of v1 scope, and each is listed here so the whole deferral set is
 visible in one place rather than scattered through the requirements.
 
-**1. Program log capture and association (Requirement 21).** The log attributor
-described in `resolve/logs.ts` is designed and specified but not implemented in
-v1. `LogReport` is emitted with `present: false`, an empty `unattributed`
-collection, and `raw` confidence, which is the same shape Requirement 21.6
-already defines for a response whose `logMessages` field is absent. No new type
-and no new variant is introduced by the deferral.
+**1. Log line association and nested CPI attribution.** Requirement 21 is split
+across the two phases rather than deferred whole.
+
+Satisfied in v1: Req 21.1, verbatim capture of `meta.logMessages` into
+`LogReport.messages`; Req 21.5, the truncation marker and `partial` collection
+confidence; Req 21.6, the absent-field case as an empty collection with `raw`
+confidence.
+
+Phase 2: Req 21.2, marker-based attribution of each line to the instruction that
+emitted it; Req 21.3, the `partial` confidence carried by each attributed log;
+Req 21.4, the `unattributed` collection, which is present in the type but empty
+in v1. Req 5.5, nested CPI failure attribution, also stays in Phase 2, so
+`FailureReport.cpiAttribution` is always `null` in v1.
+
+No new type and no new variant is introduced by the split. `AttributedLog`,
+`InstructionNode.logs`, and `LogReport.unattributed` all exist in v1 and are
+simply empty, so the `Analysis` shape does not churn between phases and every
+golden `expected.json` written in v1 stays structurally valid afterward.
+
+As recorded in the `analyze/compute.ts` section, v1 does contain a depth-1 log
+scope walker, because top-level compute attribution needs one. The Phase 2 work
+generalizes that walker to every depth rather than starting from nothing.
 
 **2. On-chain IDL fetch.** Already out of scope per the note on Requirement 18;
 restated here for completeness. IDLs come from `--idl-dir` only.
 
-**3. Correctness properties beyond the twelve marked v1-essential.** The
-remaining properties stay in this document as the specification of intended
-behavior. They are implemented in Phase 2, not discarded.
+**3. Correctness properties beyond the three marked v1-essential.** The
+remaining forty-two stay in this document as the specification of intended
+behavior. They are implemented in Phase 2, not discarded. Nine of them carry an
+explicit **Phase 2** marker because they were previously in the v1 set and a
+reader needs to see that they were promoted and then deferred; the rest were never
+in it and are unmarked, since Phase 2 is the default.
 
-### What deferring Requirement 21 costs, stated plainly
+### What deferring per-line association costs, stated plainly
 
-Two other requirements are currently designed to read their input from log data,
-so deferring logs propagates into both. This is a real reduction in v1 output and
-is recorded here rather than left to be discovered.
+The deferral is narrower than deferring logs wholesale, but it is not free, and
+the cost is recorded here rather than left to be discovered.
 
 **Requirement 5.5, nested CPI attribution.** The attribution is derived entirely
-from program logs. With Requirement 21 deferred,
-`FailureReport.cpiAttribution` is always `null` in v1. The field stays in the
-type so the `Analysis` shape does not churn between v1 and Phase 2, and every
-golden `expected.json` written in v1 remains structurally valid afterward.
-Requirement 5.2's top-level attribution is unaffected and remains fully correct:
-the failing top-level index comes from `meta.err`, not from logs, so the failing
-instruction is still marked. The consequence for testing is that the CPI
-attribution property — number 14 — is vacuously true in v1, since its antecedent
-never holds.
+from per-line log association, so `FailureReport.cpiAttribution` is always `null`
+in v1. The field stays in the type so the `Analysis` shape does not churn between
+v1 and Phase 2. Requirement 5.2's top-level attribution is unaffected and remains
+fully correct: the failing top-level index comes from `meta.err`, not from logs,
+so the failing instruction is still marked. A reader of a v1 run on a nested
+failure gets the failing top-level instruction, the resolved error, and the full
+verbatim log array — which for an Anchor program usually contains the error
+message and the invoke chain in plain text — but no machine-made claim about which
+nested frame failed.
 
-**Requirement 8.1, per-instruction compute units.** These are parsed from the
-`consumed N of M compute units` log line, which is log data. With Requirement 21
-deferred, per-instruction compute units are unavailable in v1, so every
-`InstructionNode.computeUnits` is the `available: false` variant carrying `raw`
-confidence. This is honest degradation working as designed rather than a silent
-gap: the `available: false` variant exists precisely for the case where the RPC
-did not give us the number, and a reader sees explicitly that the value was not
-available rather than seeing a zero. Requirement 8.5's transaction total is
-unaffected, because it is read from `meta.computeUnitsConsumed` rather than from
-logs, so `compute.total` is fully populated in v1.
+**Requirement 8.1, per-instruction compute units.** Top-level per-instruction
+compute units **are** available in v1, extracted from the depth-1 invoke scopes as
+described in the `analyze/compute.ts` section, so Req 8.1 is partially satisfied
+rather than wholly deferred. Nested instructions report the `available: false`
+variant carrying `raw` confidence, with the deferral named as the cause.
+Requirement 8.5's transaction total is unaffected, because it is read from
+`meta.computeUnitsConsumed` rather than from logs, so `compute.total` is fully
+populated in v1.
 
-**Effect on the fixture set.** Fixture `06-nested-cpi-failure` stays in v1 and
-still earns its place: it proves the instruction tree shape at depth three and
-the top-level failure attribution from `meta.err`. Its log-derived nested
-attribution assertion is a Phase 2 addition to the same fixture, which needs no
-re-recording — the recorded response already contains the `logMessages` the
-Phase 2 assertion will read.
+**Effect on the properties.** The CPI attribution property — number 14 — is
+vacuously true in v1, since its antecedent never holds. Log conservation —
+number 29 — is not satisfiable in v1 as written, because it quantifies over
+messages attributed across instruction nodes and nothing is attributed yet; it
+applies to Phase 2. The v1 guarantee in its place is weaker but exact:
+`LogReport.messages` equals `meta.logMessages` element for element, in order,
+with nothing lost, duplicated, or invented. That is pinned by the golden
+fixtures rather than by a property test.
 
-### The twelve v1-essential properties
+**Effect on the fixture set.** Fixture `06-nested-cpi-failure` is pinned in v1 and
+earns its place several times over: it proves the instruction tree shape at depth,
+the top-level failure attribution from `meta.err` on an instruction that has
+children, the verbatim log array, and the per-instruction compute value of each
+top-level instruction. Only its log-derived nested attribution assertion is a
+Phase 2 addition to the same fixture, and that needs no re-recording — the
+recorded response already contains the `logMessages` the Phase 2 assertion will
+read.
+
+### The three v1-essential properties
 
 | # | Property |
 | --- | --- |
-| 1 | Signature encoding round-trips for exactly the 64-byte case |
-| 2 | Signature rejection is exhaustive over both failure modes |
-| 13 | Every decoded element carries a confidence marker |
-| 20 | Account roles follow origin, and lookup-table addresses are never signers |
 | 25 | Lamport deltas are exact across the full u64 range |
 | 34 | No forbidden call site exists anywhere in the source |
-| 40 | JSON rendering round-trips the Analysis object |
-| 41 | Rendering does not mutate the Analysis object |
 | 42 | The golden comparator is order-insensitive and value-exact |
-| 43 | The exit code mapping is total and correct |
-| 44 | Stream discipline holds on every path |
-| 45 | Confidence aggregation is monotonically non-increasing |
 
-These twelve were chosen on a single criterion: each one, if violated, would
-either produce silently wrong output that a reviewer could not detect by reading
-the terminal, or would break the guarantee the product is built on. A wrong
-lamport delta above 2⁵³ looks entirely plausible on screen. A confidence marker
-that aggregates upward to `full` over a `raw` child reads as a complete decode.
-A signer designation applied to a lookup-table address reads as fact. A missing
-call-site guard removes the read-only claim outright. A comparator that ignores a
-leaf difference makes every golden test meaningless. None of these are visible by
-inspection, which is exactly why they are the ones that must be machine-checked
-first.
+Each of the three survives for a reason the golden fixtures cannot supply.
 
-One related property is worth naming explicitly so its absence from the list is
+**Number 25, lamport deltas exact across the full u64 range.** The decimal-string
+representation exists specifically to survive values above 2⁵³, and no recorded
+fixture is guaranteed to contain one. A float regression is invisible on screen —
+a rounded lamport balance has the right shape, the right magnitude, and the wrong
+digits — and the golden fixtures pin only the values the recorded transactions
+happen to hold. This is therefore the one mechanical check that the architecture's
+central data-representation decision actually works across the range it was chosen
+for.
+
+**Number 34, no forbidden call site.** It *is* the read-only guarantee. Without
+it the claim is documentation.
+
+**Number 42, the golden comparator.** It checks the comparator every pinned
+fixture depends on. A comparator that ignores a leaf difference makes the whole
+fixture suite meaningless, so this one property is load-bearing for all six
+pinned cases.
+
+### What deferring the other nine costs
+
+The nine now carrying a **Phase 2** marker were selected on a single criterion:
+each one, if violated, produces silently wrong output that a reviewer cannot
+detect by reading the terminal. A confidence marker that aggregates upward to
+`full` over a `raw` child reads as a complete decode. A signer designation applied
+to a lookup-table address reads as fact. An exit code mapped to the wrong class
+breaks every script that consumes the tool. None of these are visible by
+inspection, which is why they were promoted in the first place.
+
+v1 leans on the pinned golden fixtures for that coverage instead, and a fixture
+reaches less far than a property. It pins exact digit strings, exact confidence
+markers, and exact key orderings — but only for the values the six recorded
+transactions contain. There is no adversarial base58 signature, no generated tree
+shape, no permuted key ordering, and no input the recorded set does not already
+happen to include. The nine properties remain in this document as the
+specification of the intended behavior; what is deferred is the machine checking,
+not the requirement.
+
+One related property is worth naming explicitly so its absence from the v1 list is
 not read as an oversight: lamport-to-SOL rendering exactness — number 35 — is
-closely tied to number 25, since both stand or fall on the same
-`bigint`-and-string arithmetic. In v1 it is covered transitively by the golden
-fixtures, whose `expected.json` files pin the exact digit strings, so a
+closely tied to number 25, which *is* in the v1 set, so the `bigint`-and-string
+arithmetic both stand or fall on is directly checked in v1 even though the
+rendering-side property is not. Beyond that, number 35 is covered transitively by
+the golden fixtures, whose `expected.json` files pin the exact digit strings, so a
 floating-point regression in the conversion would fail a golden test even without
 the dedicated property test. It is promoted to a first-class property test in
 Phase 2.
