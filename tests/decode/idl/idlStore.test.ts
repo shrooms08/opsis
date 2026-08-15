@@ -45,6 +45,26 @@ function validIdl(address: string = ADDRESS): Record<string, unknown> {
   };
 }
 
+/**
+ * The same program, in the Anchor 0.30+ layout: `address` at the root, `name`
+ * and `version` under `metadata` alongside `spec`.
+ *
+ * Only the three identity fields move. The 0.30 grammar changes inside
+ * `instructions` and `accounts` are `idlDecoder.ts`'s business, so the bodies
+ * here match the legacy fixture and the two are compared field by field.
+ */
+function idl030(address: string = ADDRESS): Record<string, unknown> {
+  const legacy = validIdl(address);
+
+  return {
+    address,
+    metadata: { name: 'example_program', version: '0.1.0', spec: '0.1.0' },
+    instructions: legacy['instructions'],
+    accounts: legacy['accounts'],
+    errors: legacy['errors'],
+  };
+}
+
 let dir: string;
 
 beforeEach(async () => {
@@ -128,6 +148,106 @@ describe('loadIdlDirectory: loading and indexing', () => {
   });
 });
 
+describe('loadIdlDirectory: the Anchor 0.30+ layout (Req 18.3, 18.4)', () => {
+  it('indexes a 0.30-style IDL under the same program ID a legacy file would be', async () => {
+    await write('example.json', idl030());
+
+    const store = await loadIdlDirectory(dir);
+
+    expect(store.warnings).toEqual([]);
+    expect(store.programIds).toEqual([ADDRESS]);
+
+    const idl = store.get(ADDRESS);
+    expect(idl?.address).toBe(ADDRESS);
+    expect(idl?.name).toBe('example_program');
+    expect(idl?.version).toBe('0.1.0');
+    expect(idl?.path).toBe(join(dir, 'example.json'));
+  });
+
+  it('surfaces instructions, errors, and accounts exactly as the legacy path does', async () => {
+    await write('modern.json', idl030());
+    const modern = (await loadIdlDirectory(dir)).get(ADDRESS);
+
+    await rm(join(dir, 'modern.json'));
+    await write('legacy.json', validIdl());
+    const legacy = (await loadIdlDirectory(dir)).get(ADDRESS);
+
+    // Tasks 6.5 and 6.10 consume the same three fields either way, so the two
+    // loaded shapes differ only in the path they came from.
+    expect(modern?.instructions).toEqual(legacy?.instructions);
+    expect(modern?.errors).toEqual(legacy?.errors);
+    expect(modern?.accounts).toEqual(legacy?.accounts);
+  });
+
+  it.each([
+    ['address', '"address" or "metadata.address" is missing'],
+    ['name', '"name" or "metadata.name" is missing'],
+    ['version', '"version" or "metadata.version" is missing'],
+  ])('warns when a 0.30-style file has no %s in either position', async (field, reason) => {
+    const broken = idl030();
+    if (field === 'address') {
+      // A 0.30 file carries no `metadata.address`, so dropping the root one
+      // leaves nothing to index by.
+      delete broken['address'];
+    } else {
+      const metadata = { ...(broken['metadata'] as Record<string, unknown>) };
+      delete metadata[field];
+      broken['metadata'] = metadata;
+    }
+    const badPath = await write('broken.json', broken);
+
+    const store = await loadIdlDirectory(dir);
+
+    expect(store.programIds).toEqual([]);
+    expect(store.warnings).toEqual([{ kind: 'file-invalid', path: badPath, reason }]);
+  });
+
+  it('accepts a file whose three identity values all sit at the root, with no metadata', async () => {
+    const rooted: Record<string, unknown> = {
+      ...idl030(),
+      version: '0.1.0',
+      name: 'example_program',
+    };
+    delete rooted['metadata'];
+    await write('rooted.json', rooted);
+
+    const store = await loadIdlDirectory(dir);
+
+    // `metadata` is not required in itself: it is one of two places the loader
+    // looks, and this file has everything the loader reads.
+    expect(store.warnings).toEqual([]);
+    expect(store.get(ADDRESS)?.name).toBe('example_program');
+  });
+
+  it('rejects a file whose two positions for a value disagree, rather than picking one', async () => {
+    const conflicting: Record<string, unknown> = { ...idl030(), address: OTHER_ADDRESS };
+    conflicting['metadata'] = { name: 'example_program', version: '0.1.0', address: ADDRESS };
+    const badPath = await write('conflict.json', conflicting);
+
+    const store = await loadIdlDirectory(dir);
+
+    expect(store.programIds).toEqual([]);
+    expect(store.warnings).toHaveLength(1);
+    expect(store.warnings[0]?.path).toBe(badPath);
+    expect(store.warnings[0]?.reason).toBe(
+      `"address" is "${OTHER_ADDRESS}" but "metadata.address" is "${ADDRESS}"; ` +
+        'the two disagree, so which one describes this program cannot be decided here',
+    );
+  });
+
+  it('loads a legacy and a 0.30-style IDL for different programs from one directory', async () => {
+    await write('a-legacy.json', validIdl());
+    await write('b-modern.json', idl030(OTHER_ADDRESS));
+
+    const store = await loadIdlDirectory(dir);
+
+    expect(store.warnings).toEqual([]);
+    expect(store.programIds).toEqual([ADDRESS, OTHER_ADDRESS].sort());
+    expect(store.get(ADDRESS)?.path).toBe(join(dir, 'a-legacy.json'));
+    expect(store.get(OTHER_ADDRESS)?.path).toBe(join(dir, 'b-modern.json'));
+  });
+});
+
 describe('loadIdlDirectory: one bad IDL never fails the run (Req 18.4)', () => {
   it('warns on invalid JSON and keeps loading the remaining files', async () => {
     const badPath = await write('a-broken.json', '{ "version": "0.1.0", ');
@@ -141,24 +261,28 @@ describe('loadIdlDirectory: one bad IDL never fails the run (Req 18.4)', () => {
     expect(store.warnings[0]?.reason).toContain('not valid JSON');
   });
 
-  it.each(['version', 'name', 'instructions', 'metadata'])(
-    'warns naming the file and the field when %s is missing',
-    async (field) => {
-      const broken = validIdl();
-      delete broken[field];
-      const badPath = await write('broken.json', broken);
-      await write('good.json', validIdl(OTHER_ADDRESS));
+  // Deleting a field from a legacy file leaves the value unresolvable from both
+  // accepted positions, so the reason names both — a legacy file has no
+  // `metadata.version` to fall back on, and dropping its whole `metadata` block
+  // takes the address with it.
+  it.each([
+    ['version', '"version" or "metadata.version" is missing'],
+    ['name', '"name" or "metadata.name" is missing'],
+    ['instructions', '"instructions" is missing'],
+    ['metadata', '"address" or "metadata.address" is missing'],
+  ])('warns naming the file and both accepted positions when %s is missing', async (field, reason) => {
+    const broken = validIdl();
+    delete broken[field];
+    const badPath = await write('broken.json', broken);
+    await write('good.json', validIdl(OTHER_ADDRESS));
 
-      const store = await loadIdlDirectory(dir);
+    const store = await loadIdlDirectory(dir);
 
-      expect(store.programIds).toEqual([OTHER_ADDRESS]);
-      expect(store.warnings).toEqual([
-        { kind: 'file-invalid', path: badPath, reason: `"${field}" is missing` },
-      ]);
-    },
-  );
+    expect(store.programIds).toEqual([OTHER_ADDRESS]);
+    expect(store.warnings).toEqual([{ kind: 'file-invalid', path: badPath, reason }]);
+  });
 
-  it('warns when metadata.address is missing, since there would be nothing to index by', async () => {
+  it('warns when the address is in neither position, since there would be nothing to index by', async () => {
     const broken = validIdl();
     broken['metadata'] = {};
     const badPath = await write('broken.json', broken);
@@ -167,7 +291,11 @@ describe('loadIdlDirectory: one bad IDL never fails the run (Req 18.4)', () => {
 
     expect(store.programIds).toEqual([]);
     expect(store.warnings).toEqual([
-      { kind: 'file-invalid', path: badPath, reason: '"metadata.address" is missing' },
+      {
+        kind: 'file-invalid',
+        path: badPath,
+        reason: '"address" or "metadata.address" is missing',
+      },
     ]);
   });
 
@@ -188,7 +316,7 @@ describe('loadIdlDirectory: one bad IDL never fails the run (Req 18.4)', () => {
 
     const store = await loadIdlDirectory(dir);
 
-    expect(store.warnings[0]?.reason).toBe('"version" is missing');
+    expect(store.warnings[0]?.reason).toBe('"version" or "metadata.version" is missing');
   });
 
   it('ignores a second file claiming an address already loaded, naming the winner', async () => {

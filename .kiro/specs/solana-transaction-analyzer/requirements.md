@@ -295,12 +295,14 @@ Opsis is a read-only command-line tool that analyzes Solana transaction signatur
 
 **Note:** Fetching IDLs from on-chain accounts is out of scope for v1. IDLs are read from a local directory only.
 
+**Note:** Both Anchor IDL layouts are accepted, because the identity fields moved in Anchor 0.30: Anchor 0.29 and earlier place version and name at the document root and the program ID at metadata.address, while Anchor 0.30 and later place the program ID at the root address field and version and name under metadata. Accepting only one layout would reject every IDL emitted by the other toolchain.
+
 #### Acceptance Criteria
 
 1. THE Opsis SHALL accept IDL directory configuration from the --idl-dir command-line flag
 2. WHEN the --idl-dir flag specifies a directory, THE Opsis SHALL load every IDL file with a .json extension from that directory
-3. THE Opsis SHALL extract the program ID from the metadata.address field of each loaded IDL file and associate that program ID with that IDL in memory
-4. IF an IDL file contains invalid JSON syntax or is missing any of the required Anchor JSON format fields version, name, instructions, or metadata.address, THEN THE Opsis SHALL write a warning message identifying the file path and the failure reason to stderr and continue loading the remaining IDL files
+3. THE Opsis SHALL extract the program ID of each loaded IDL file from the metadata.address field or from the top-level address field, corresponding to Anchor 0.29 and earlier and Anchor 0.30 and later respectively, and associate that program ID with that IDL in memory
+4. IF an IDL file contains invalid JSON syntax, or is missing the required Anchor JSON format field instructions, or is missing version from both the document root and metadata.version, or is missing name from both the document root and metadata.name, or is missing the program ID from both metadata.address and the top-level address field, THEN THE Opsis SHALL write a warning message identifying the file path and the failure reason to stderr and continue loading the remaining IDL files
 
 ### Requirement 19: Resolve Account Keys for v0 Messages
 
@@ -334,7 +336,7 @@ Opsis is a read-only command-line tool that analyzes Solana transaction signatur
 
 ### Requirement 21: Capture and Associate Program Logs
 
-**User Story:** As a developer, I want program log messages associated with the instructions that emitted them, so that I can trace execution without reading a flat log dump.
+**User Story:** As a developer, I want program `log messages associated with the instructions that emitted them, so that I can trace execution without reading a flat log dump.
 
 #### Acceptance Criteria
 

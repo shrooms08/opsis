@@ -5,7 +5,8 @@
  *
  * `--idl-dir` is accepted by `cli.ts` and arrives here through
  * `ResolvedConfig.idlDir` (Req 18.1). Every `*.json` file in that directory is
- * loaded (Req 18.2) and indexed by `metadata.address` (Req 18.3). Downstream,
+ * loaded (Req 18.2) and indexed by the program address the file declares, read
+ * from `metadata.address` or from the top-level `address` (Req 18.3). Downstream,
  * `decode/registry.ts` asks this store for the program's IDL before trying a
  * built-in decoder, and `resolve/errorResolver.ts` reads the `errors` array off
  * it, which is why `instructions`, `errors`, and `accounts` are all surfaced in
@@ -26,10 +27,26 @@
  *   `localeCompare`, because a locale-sensitive sort would make the output
  *   depend on `LANG` and break Requirement 9.7.
  * - **No Anchor runtime dependency.** The IDL is read structurally by the
- *   validator below. Only `instructions`, `errors`, `accounts`, and
- *   `metadata.address` are needed, and pulling in the Anchor client to reach
- *   four fields would add a large dependency whose version would then have to
- *   track the IDLs users happen to have on disk.
+ *   validator below. Only `instructions`, `errors`, `accounts`, and the program
+ *   address are needed, and pulling in the Anchor client to reach four fields
+ *   would add a large dependency whose version would then have to track the IDLs
+ *   users happen to have on disk.
+ * - **Two on-disk layouts, one loaded shape** (Req 18.3, 18.4). Anchor moved the
+ *   three identity fields between releases, so each is read from either
+ *   position:
+ *
+ *   | value     | Anchor ≤0.29        | Anchor 0.30+        |
+ *   | --------- | ------------------- | ------------------- |
+ *   | `address` | `metadata.address`  | `address` (root)    |
+ *   | `version` | `version` (root)    | `metadata.version`  |
+ *   | `name`    | `name` (root)       | `metadata.name`     |
+ *
+ *   `instructions`, `errors`, and `accounts` sit at the root in both. A value is
+ *   missing only when it is absent from *both* positions, so `LoadedIdl` keeps
+ *   all three non-optional and no consumer can tell which layout a file used.
+ *   The 0.30 grammar changes *inside* `instructions` and `accounts` are not this
+ *   module's business — `IdlTypeNode` is `unknown` and `idlDecoder.ts` owns
+ *   interpretation.
  *
  * **Deviation from tasks.md, agreed with the user and recorded here so it reads
  * as a decision rather than an omission.** tasks.md and design.md both say the
@@ -127,7 +144,10 @@ export interface LoadedIdl {
   readonly path: string;
   readonly version: string;
   readonly name: string;
-  /** From `metadata.address` (Req 18.3). The key this IDL is indexed under. */
+  /**
+   * From `metadata.address` (Anchor ≤0.29) or the top-level `address` (Anchor
+   * 0.30+) — Req 18.3. The key this IDL is indexed under.
+   */
   readonly address: Base58Address;
   readonly instructions: readonly IdlInstruction[];
   /** Empty when the IDL declares no errors. */
@@ -227,7 +247,7 @@ export async function loadIdlDirectory(dir: string): Promise<IdlStore> {
       warnings.push({
         kind: 'duplicate-address',
         path,
-        reason: `metadata.address ${parsed.idl.address} was already loaded from ${existing.path}, so this file was ignored`,
+        reason: `program address ${parsed.idl.address} was already loaded from ${existing.path}, so this file was ignored`,
       });
       continue;
     }
@@ -330,18 +350,39 @@ async function loadIdlFile(path: string): Promise<IdlParse> {
 // ---------------------------------------------------------------------------
 
 /**
- * Check the four required fields and build the typed shape (Req 18.4).
+ * Check the four required values and build the typed shape (Req 18.4).
+ *
+ * Two layouts are accepted, because Anchor 0.30 moved the identity fields and
+ * both toolchains are in use:
+ *
+ * - **Anchor ≤0.29** — `version` and `name` at the root, address at
+ *   `metadata.address`.
+ * - **Anchor 0.30+** — `address` at the root, `name` and `version` under
+ *   `metadata` (alongside `spec`).
+ *
+ * Each of the three is resolved from *either* position, so a mixed or
+ * hand-edited file loads as long as every value is reachable somewhere. Only a
+ * value absent from both positions is a warning.
  *
  * Checked in the order Requirement 18.4 lists them — `version`, `name`,
- * `instructions`, `metadata.address` — so a file missing several of them always
+ * `instructions`, then the address — so a file missing several of them always
  * reports the same one, and the warning text for a given file is stable across
- * runs.
+ * runs. Within one value, the root position is examined before the `metadata`
+ * one, so which position a wrong-type reason names is fixed too.
  *
  * A field of the wrong type is treated as a missing field, and the reason says
  * what was found instead. `"instructions": {}` is no more usable than no
  * `instructions` key at all, and reporting it as "missing" while showing the
  * type is more useful to someone looking at the file than a separate outcome
  * would be.
+ *
+ * **`metadata` is no longer required in itself.** It used to be, when it was the
+ * only place the address could live. Now it is just one of two places the three
+ * identity values may sit, and a file carrying a root `address`, `version`, and
+ * `name` has everything this module reads — rejecting it would be rejecting on a
+ * container the loader never looks at, the same reason `IdlTypeNode` is left
+ * `unknown`. A malformed `metadata` (a string, an array) is not an error either;
+ * it simply contributes no positions, so the root has to supply everything.
  *
  * Validation is file-level and all-or-nothing: a file either becomes a
  * `LoadedIdl` or produces exactly one warning. The alternative — loading an IDL
@@ -355,30 +396,22 @@ function validateIdl(path: string, document: unknown): IdlParse {
     return { ok: false, reason: `expected a JSON object at the document root, found ${typeName(document)}` };
   }
 
-  const version = root['version'];
-  if (typeof version !== 'string') {
-    return { ok: false, reason: fieldReason('version', 'a string', version) };
-  }
+  // `null` when absent or not an object: no positions, rather than an error.
+  const metadata = asRecord(root['metadata']);
 
-  const name = root['name'];
-  if (typeof name !== 'string') {
-    return { ok: false, reason: fieldReason('name', 'a string', name) };
-  }
+  const version = resolveIdentity('version', 'a string', root, metadata);
+  if (!version.ok) return version;
+
+  const name = resolveIdentity('name', 'a string', root, metadata);
+  if (!name.ok) return name;
 
   const rawInstructions = root['instructions'];
   if (!Array.isArray(rawInstructions)) {
     return { ok: false, reason: fieldReason('instructions', 'an array', rawInstructions) };
   }
 
-  const metadata = asRecord(root['metadata']);
-  if (metadata === null) {
-    return { ok: false, reason: fieldReason('metadata', 'an object', root['metadata']) };
-  }
-
-  const address = metadata['address'];
-  if (typeof address !== 'string' || address === '') {
-    return { ok: false, reason: fieldReason('metadata.address', 'a non-empty string', address) };
-  }
+  const address = resolveIdentity('address', 'a non-empty string', root, metadata);
+  if (!address.ok) return address;
 
   const instructions: IdlInstruction[] = [];
   for (const [index, entry] of rawInstructions.entries()) {
@@ -397,9 +430,9 @@ function validateIdl(path: string, document: unknown): IdlParse {
     ok: true,
     idl: {
       path,
-      version,
-      name,
-      address,
+      version: version.value,
+      name: name.value,
+      address: address.value,
       instructions,
       errors: errors.value,
       accounts: accounts.value,
@@ -408,6 +441,72 @@ function validateIdl(path: string, document: unknown): IdlParse {
 }
 
 type Checked<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: string };
+
+/**
+ * One of `version`, `name`, `address`, read from the root or from `metadata`.
+ *
+ * The root position is examined first, so the position a wrong-type reason names
+ * is a function of the file and not of which layout the file is closer to.
+ *
+ * **A present-in-both disagreement is a warning, not a preference.** If the root
+ * says one thing and `metadata` says another, this file is malformed under both
+ * Anchor layouts, and no toolchain emits it. For `address` a silent choice is
+ * outright dangerous: the address is the key the store is indexed by, so guessing
+ * wrong means decoding one program's instructions with another program's IDL —
+ * a confidently wrong answer where a warning is a true one. `version` and `name`
+ * are only labels, but a rule that holds for all three is one the user can
+ * predict, and splitting it would mean the same file shape sometimes loads and
+ * sometimes does not depending on which field disagreed. Both values are quoted
+ * in the reason so the fix is obvious.
+ */
+function resolveIdentity(
+  field: 'version' | 'name' | 'address',
+  expected: 'a string' | 'a non-empty string',
+  root: Readonly<Record<string, unknown>>,
+  metadata: Readonly<Record<string, unknown>> | null,
+): Checked<string> {
+  const positions = [
+    { label: field, value: root[field] },
+    { label: `metadata.${field}`, value: metadata === null ? undefined : metadata[field] },
+  ];
+
+  const present = positions.filter((position) => position.value !== undefined);
+  if (present.length === 0) {
+    return { ok: false, reason: missingReason(positions.map((position) => position.label)) };
+  }
+
+  const usable = present.filter(
+    (position) =>
+      typeof position.value === 'string' &&
+      (expected === 'a string' || position.value !== ''),
+  );
+
+  const first = usable[0];
+  const offending = present[0];
+  if (first === undefined) {
+    // Every present position holds something unusable; name the first one.
+    return {
+      ok: false,
+      reason:
+        offending === undefined
+          ? missingReason(positions.map((position) => position.label))
+          : fieldReason(offending.label, expected, offending.value),
+    };
+  }
+
+  const conflict = usable.find((position) => position.value !== first.value);
+  if (conflict !== undefined) {
+    return {
+      ok: false,
+      reason:
+        `"${first.label}" is ${JSON.stringify(first.value)} but "${conflict.label}" is ` +
+        `${JSON.stringify(conflict.value)}; the two disagree, so which one describes ` +
+        `this program cannot be decided here`,
+    };
+  }
+
+  return { ok: true, value: first.value as string };
+}
 
 function validateInstruction(entry: unknown, at: string): Checked<IdlInstruction> {
   const record = asRecord(entry);
@@ -571,6 +670,17 @@ function fieldReason(field: string, expected: string, found: unknown): string {
   return found === undefined
     ? `"${field}" is missing`
     : `"${field}" must be ${expected}, found ${typeName(found)}`;
+}
+
+/**
+ * A value the loader looked for in more than one place, found in none of them.
+ *
+ * Both positions are named, so a user whose Anchor 0.30 IDL genuinely has no
+ * name is told where the loader looked instead of being pointed at the one
+ * legacy spelling.
+ */
+function missingReason(labels: readonly string[]): string {
+  return `${labels.map((label) => `"${label}"`).join(' or ')} is missing`;
 }
 
 /** What a value is, for a diagnostic. `typeof` alone calls null and arrays objects. */
