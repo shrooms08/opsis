@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "decoder-confidence-guard",
+      "description": "Restates the totality, confidence, and documented-support rules whenever a built-in decoder is added.",
+      "trigger": "PostFileCreate",
+      "matcher": "src/decode/builtin/.*\\.ts$",
+      "action": {
+        "type": "agent",
+        "prompt": "A new decoder was added under src/decode/builtin/. Three rules it must satisfy before it counts as done.\n\n1. Total, and it never throws. Every failure is a DecodeOutcome variant, not an exception: a truncated payload, an empty payload, and an unrecognised discriminant are all return values. no-match means \"not mine, keep going down the ladder\" and error means \"mine, and it did not parse\". Choosing error where no-match belongs stops resolution early and buries a decode a lower rung would have made.\n\n2. Confidence reports what was read, never what would look better. If any byte is left unconsumed or any argument is unresolved, the outcome is partial and carries the undecoded remainder. Never upgrade partial to full to tidy the output: a partial decode presented as complete is the exact dishonesty the confidence marker exists to prevent. A decoder does not assert its own confidence; the registry derives it from what the decoder reports, and that split is what keeps the claim unforgeable.\n\n3. No unexercised claim of support. A decoder with no recorded fixture exercising it must not be listed as supported in the README. Where a fixture pins some instructions and not others, say which: record the unexercised ones as resting on the upstream encoding alone rather than as verified.\n\nAlso confirm before finishing: no float arithmetic, no clock, no Math.random, no locale formatting. The read-only AST guard in tests/guard/readonly.test.ts scans src/decode/ and fails on any of them. Any value that can exceed 2^53 is a decimal string via bigint, never a number."
+      }
+    }
+  ]
+}

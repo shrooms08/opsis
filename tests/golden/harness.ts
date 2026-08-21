@@ -1,5 +1,5 @@
 /**
- * The golden harness. Requirements 14.1–14.8.
+ * The golden harness. Requirements 14.1–14.11.
  *
  * One fixture directory in, one `GoldenResult` out. Nothing here throws for a
  * broken fixture and nothing here prints: every outcome — pass, pending, fail —
@@ -41,6 +41,7 @@
 
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 
 import type { Base58Signature } from '../../src/model/analysis.js';
 import { analyzeTransaction } from '../../src/pipeline.js';
@@ -53,6 +54,66 @@ export const INPUT_FILE = 'input.json';
 
 /** The canonical serialization of the expected `Analysis`. */
 export const EXPECTED_FILE = 'expected.json';
+
+/**
+ * The Requirement 14.10 budget for the whole golden suite, in milliseconds.
+ *
+ * It holds with room to spare because there is nothing slow in the suite to
+ * begin with: each fixture is one JSON parse, a few thousand pure function
+ * calls, and one string comparison. No network, no process spawn, no compile
+ * step, and no sleep anywhere. If this ever trips, something structural has
+ * changed — an accidental I/O path, a quadratic walk — and that is worth failing
+ * over rather than raising.
+ */
+export const GOLDEN_TIME_BUDGET_MS = 10_000;
+
+/**
+ * The fixture directories whose `expected.json` is mandatory.
+ *
+ * Transcribed from what is on disk, deliberately: **there is no `05`**, and `06`
+ * and `07` are real. An earlier revision of this list named `03-spl-token-error`,
+ * `04-anchor-framework-error`, and `05-v0-lookup-tables` — none of which exist —
+ * and omitted `07-unknown-program`, which does. That is the worst shape this
+ * check can take: a list of names matching nothing enforces nothing while reading
+ * as though it covers six cases. `./golden.test.ts` asserts every name here was
+ * discovered and compared, so the list cannot drift away from the directory tree
+ * again without a red test.
+ *
+ * **Why a list at all, when in v1 it is exactly the recorded set.** The list is
+ * what turns a *missing* `expected.json` into a failure instead of a `pending`
+ * report. `pending` stays for the opposite case: a directory recorded later and
+ * not yet hand-reviewed, which is how the partial-decode fixture will arrive.
+ * Reporting an unreviewed fixture as a pass is the dishonesty `pending` exists to
+ * prevent, and deleting the list would mean a hand-reviewed file could vanish and
+ * the suite would still be green.
+ *
+ * Deleting this list — so discovery alone requires an `expected.json` and
+ * `pending` goes with it — is Phase 2. In v1 that flip is indistinguishable from
+ * this one, because the pinned set *is* the recorded set; it becomes a real change
+ * the moment a seventh case is recorded.
+ */
+export const PINNED_FIXTURES: readonly string[] = [
+  '01-success-cpi-heavy',
+  '02-anchor-user-error',
+  '03-program-table-error',
+  '04-unattested-band-collision',
+  '06-nested-cpi-failure',
+  '07-unknown-program',
+];
+
+const PINNED = new Set(PINNED_FIXTURES);
+
+/**
+ * Whether a fixture directory name is pinned.
+ *
+ * Keyed on the name alone, not on the name plus the root. That is what lets
+ * `./harness.test.ts` exercise the pinned branch over a temp directory carrying
+ * a pinned name, and it costs nothing in production, where there is one golden
+ * root. Exact match: `01-success-cpi-heavy-copy` is not pinned.
+ */
+export function isPinned(name: string): boolean {
+  return PINNED.has(name);
+}
 
 /**
  * The stem `FixtureSource` turns into `input.json`.
@@ -74,6 +135,10 @@ const INPUT_STEM: Base58Signature = 'input';
  * misnamed `expected.json` would look exactly like a case that was never
  * recorded. Counting `pending` separately is what makes that omission visible in
  * every run.
+ *
+ * `pending` is reachable only for a directory outside `PINNED_FIXTURES`. For a
+ * pinned one the same file state is a `fail`, because a hand-reviewed
+ * `expected.json` disappearing is a regression and not an unfinished case.
  */
 export type GoldenResult =
   | { readonly name: string; readonly dir: string; readonly outcome: 'pass' }
@@ -98,6 +163,13 @@ export interface GoldenRun {
   readonly passed: number;
   readonly pending: number;
   readonly failed: number;
+  /**
+   * Wall-clock milliseconds for the whole run, measured around the fixture loop
+   * so it covers discovery, every file read, every pipeline run, and every
+   * comparison — what Requirement 14.10 budgets. Monotonic (`performance.now`),
+   * so a clock adjustment mid-run cannot produce a negative or a wild figure.
+   */
+  readonly elapsedMs: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +216,7 @@ function byCodePoint(left: string, right: string): number {
 
 /** Run every discovered fixture, in discovery order, and tally the outcomes. */
 export async function runGolden(root: string): Promise<GoldenRun> {
+  const startedAt = performance.now();
   const results: GoldenResult[] = [];
   for (const name of await discoverFixtures(root)) {
     results.push(await runFixture(root, name));
@@ -154,6 +227,7 @@ export async function runGolden(root: string): Promise<GoldenRun> {
     passed: results.filter((result) => result.outcome === 'pass').length,
     pending: results.filter((result) => result.outcome === 'pending').length,
     failed: results.filter((result) => result.outcome === 'fail').length,
+    elapsedMs: performance.now() - startedAt,
   };
 }
 
@@ -161,9 +235,10 @@ export async function runGolden(root: string): Promise<GoldenRun> {
  * Run one fixture directory.
  *
  * The order of the four steps is the order in which they can fail: a missing or
- * invalid `input.json` (Req 14.2, 14.3), then a missing `expected.json`
- * (`pending`) or an unparseable one (Req 14.4, 14.5), then the pipeline
- * (Req 14.6), then the comparison (Req 14.7, 14.8).
+ * invalid `input.json` (Req 14.2, 14.3), then a missing `expected.json` — a
+ * failure for a pinned fixture, `pending` otherwise — or an unparseable one
+ * (Req 14.4, 14.5), then the pipeline (Req 14.6), then the comparison
+ * (Req 14.7, 14.8).
  */
 export async function runFixture(root: string, name: string): Promise<GoldenResult> {
   const dir = join(root, name);
@@ -191,6 +266,14 @@ export async function runFixture(root: string, name: string): Promise<GoldenResu
   const expected = await readExpected(expectedPath);
   switch (expected.kind) {
     case 'absent':
+      // A pinned fixture's ground truth is hand-reviewed and committed, so its
+      // absence is a regression rather than an unfinished case (Req 14.5, 14.11).
+      if (isPinned(name)) {
+        return fail(
+          `${name}: ${EXPECTED_FILE} is missing at ${expectedPath}, and ${name} is pinned — ` +
+            'a pinned fixture must carry a hand-reviewed expected.json',
+        );
+      }
       return { name, dir, outcome: 'pending', expectedPath };
     case 'unreadable':
       return fail(`${name}: ${EXPECTED_FILE} could not be read at ${expectedPath}: ${expected.detail}`);
@@ -465,11 +548,28 @@ export function formatDifferences(
 }
 
 /**
+ * The one-line tally, printed on every run.
+ *
+ * Printed unconditionally, including on the all-green run. `6 discovered: 6
+ * compared, 0 pending, 0 failed` is the sentence that distinguishes six real
+ * comparisons from six directories nobody looked at, and a suite that only speaks
+ * up when something is wrong cannot make that distinction.
+ */
+export function summaryLine(run: GoldenRun): string {
+  return `${run.results.length} discovered: ${run.passed} compared, ${run.pending} pending, ${run.failed} failed`;
+}
+
+/**
  * The pending banner, printed on every run that has one.
  *
  * Loud on purpose. A pending fixture is a recorded case whose ground truth has
  * not been pinned, and the whole reason `pending` exists as an outcome is that
  * silence here would be indistinguishable from a passing suite.
+ *
+ * In v1 no run reaches this: the six recorded directories are the six pinned
+ * ones, so a missing `expected.json` fails instead. It stays because the next
+ * recorded case — the partial-decode fixture — arrives unreviewed, and this is
+ * what the harness owes the reader between recording it and pinning it.
  */
 export function pendingReport(run: GoldenRun): string {
   const pending = run.results.filter((result) => result.outcome === 'pending');
@@ -479,17 +579,14 @@ export function pendingReport(run: GoldenRun): string {
     `GOLDEN FIXTURES: ${pending.length} PENDING — recorded but not pinned`,
     rule,
     `A pending fixture has ${INPUT_FILE} and no ${EXPECTED_FILE}, so nothing was`,
-    'compared. Pending is not a pass and not a skip. Task 9 authors the expected',
-    'files; task 13.1 then makes a missing one a hard failure for the pinned six.',
+    'compared. Pending is not a pass and not a skip. Hand-review the analysis,',
+    `write ${EXPECTED_FILE}, then add the directory to PINNED_FIXTURES so its`,
+    'absence can never again read as anything but a failure.',
     '',
   ];
   for (const result of pending) {
     lines.push(`  pending  ${result.name}/${EXPECTED_FILE}  (not written yet)`);
   }
-  lines.push(
-    '',
-    `${run.results.length} discovered: ${run.passed} compared, ${pending.length} pending, ${run.failed} failed`,
-    rule,
-  );
+  lines.push('', summaryLine(run), rule);
   return lines.join('\n');
 }

@@ -1,12 +1,12 @@
 /**
  * The harness's own failure paths, over temp directories.
  *
- * `./golden.test.ts` runs the harness against the committed fixtures, where
- * every case is currently `pending` — which means the paths that matter most
- * (a mismatch report, an unparseable file, a missing `input.json`) are never
- * taken there. A harness whose failure reporting is itself untested is a harness
- * that can pass a broken fixture silently, so those paths are exercised here on
- * directories built for the purpose.
+ * `./golden.test.ts` runs the harness against the committed fixtures, where every
+ * case passes — which means the paths that matter most (a mismatch report, an
+ * unparseable file, a missing `input.json`, a missing `expected.json`) are never
+ * taken there, and cannot be without breaking a committed fixture. A harness whose
+ * failure reporting is itself untested is a harness that can pass a broken fixture
+ * silently, so those paths are exercised here on directories built for the purpose.
  *
  * Temp directories, never `tests/golden/`: these tests write and delete
  * fixture-shaped trees, and nothing here may touch the committed ones.
@@ -30,6 +30,8 @@ import {
   canonicalize,
   diffJson,
   discoverFixtures,
+  isPinned,
+  PINNED_FIXTURES,
   runFixture,
   runGolden,
   type GoldenResult,
@@ -139,6 +141,52 @@ describe('runFixture: expected.json', () => {
 
     expect(report).toContain(join(dir, 'expected.json'));
     expect(report).toContain('not valid JSON');
+  });
+});
+
+describe('the pinned list', () => {
+  it('fails a pinned directory with no expected.json, where a non-pinned one is pending', async () => {
+    // The contrast is the whole reason `PINNED_FIXTURES` exists. Both directories
+    // are in the identical file state — a valid `input.json`, no `expected.json` —
+    // and the only thing separating a hard failure from a `pending` report is
+    // membership in the list. Run through `runGolden` so the tally is checked
+    // alongside the two outcomes.
+    const pinned = PINNED_FIXTURES[0];
+    if (pinned === undefined) throw new Error('PINNED_FIXTURES is empty');
+    expect(isPinned('99-recorded-later')).toBe(false);
+
+    await writeCase(pinned, { input: RECORDED.text });
+    await writeCase('99-recorded-later', { input: RECORDED.text });
+
+    const run = await runGolden(root);
+    const outcomes = new Map(run.results.map((result) => [result.name, result.outcome]));
+
+    expect(outcomes.get(pinned)).toBe('fail');
+    expect(outcomes.get('99-recorded-later')).toBe('pending');
+    expect({ passed: run.passed, pending: run.pending, failed: run.failed }).toEqual({
+      passed: 0,
+      pending: 1,
+      failed: 1,
+    });
+
+    // Req 14.5: the report names the file path, and says why this one is not
+    // pending, so nobody has to guess which list to look at.
+    const pinnedResult = run.results.find((result) => result.name === pinned);
+    if (pinnedResult === undefined) throw new Error(`${pinned} was not discovered`);
+    const report = reportOf(pinnedResult);
+    expect(report).toContain(join(root, pinned, 'expected.json'));
+    expect(report).toContain('pinned');
+  });
+
+  it('matches names exactly, so a copied directory is not pinned', async () => {
+    const pinned = PINNED_FIXTURES[0];
+    if (pinned === undefined) throw new Error('PINNED_FIXTURES is empty');
+    expect(isPinned(pinned)).toBe(true);
+    expect(isPinned(`${pinned}-copy`)).toBe(false);
+
+    await writeCase(`${pinned}-copy`, { input: RECORDED.text });
+
+    expect((await runFixture(root, `${pinned}-copy`)).outcome).toBe('pending');
   });
 });
 

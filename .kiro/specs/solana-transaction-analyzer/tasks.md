@@ -808,7 +808,7 @@ a coverage table so each of the three is traceable to exactly one task.
       not weaker
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5_
 
-- [ ] 9. Author and hand-review the six pinned `expected.json` ground-truth files
+- [x] 9. Author and hand-review the six pinned `expected.json` ground-truth files
 
   Each sub-task runs the pipeline over the recorded `input.json`, then **a human
   reads the produced object field by field against the recorded response before
@@ -875,7 +875,7 @@ a coverage table so each of the three is traceable to exactly one task.
   the partial-decode coverage gap recorded in the Overview, which no pinned case
   closes, because the case that would have closed it was never recorded.
 
-  - [ ] 9.1 Author `expected.json` for the successful CPI-heavy case
+  - [x] 9.1 Author `expected.json` for the successful CPI-heavy case
     - `01-success-cpi-heavy`: built-in decode of each top-level instruction,
       lamport deltas across every touched account, `failed: false` on every node
       at every depth, `failure: null`, and `outcome.succeeded: true`
@@ -893,7 +893,7 @@ a coverage table so each of the three is traceable to exactly one task.
       native-program reason
     - _Requirements: 3.2, 3.3, 3.4, 4.4, 7.8, 8.1, 14.4, 21.1_
 
-  - [ ] 9.2 Hand-review the v0 lookup-table half of the same `expected.json`
+  - [x] 9.2 Hand-review the v0 lookup-table half of the same `expected.json`
     - **Retargeted to `01-success-cpi-heavy`.** An earlier revision pointed this
       sub-task at `05-v0-lookup-tables`, which was never recorded: its predicates
       were folded into `01-success-cpi-heavy`, a v0 message carrying 7 writable and
@@ -916,7 +916,7 @@ a coverage table so each of the three is traceable to exactly one task.
       about them twice here
     - _Requirements: 7.5, 7.6, 7.7, 8.1, 14.4, 19.3, 21.1_
 
-  - [ ] 9.3 Author `expected.json` for the four error-resolution cases
+  - [x] 9.3 Author `expected.json` for the four error-resolution cases
     - **Two of these four invert what an earlier revision of this sub-task
       claimed, and a third resolves by a different route than it claimed.** That
       revision named `04-anchor-framework-error` and `03-spl-token-error`, neither
@@ -976,7 +976,7 @@ a coverage table so each of the three is traceable to exactly one task.
     - _Requirements: 4.3, 5.2, 6.1, 6.2, 6.3, 6.6, 6.8, 8.1, 11.1, 11.5, 14.4,
       18.2, 21.1_
 
-  - [ ] 9.4 Author `expected.json` for the nested-CPI failure case
+  - [x] 9.4 Author `expected.json` for the nested-CPI failure case
     - `06-nested-cpi-failure`: a failure whose failing top-level instruction has
       children. This is the pinned case that covers Requirement 5.2 at the point
       where it is subtle, so the hand review here is the most load-bearing of the
@@ -1122,7 +1122,7 @@ a coverage table so each of the three is traceable to exactly one task.
 
 - [ ] 13. Verification hardening
 
-  - [ ] 13.1 Make the golden harness strict for the six pinned fixtures
+  - [x] 13.1 Make the golden harness strict for the six pinned fixtures
     - Carry the six pinned fixture directory names as an explicit list in the
       harness — `01-success-cpi-heavy`, `02-anchor-user-error`,
       `03-program-table-error`, `04-unattested-band-collision`,

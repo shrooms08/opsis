@@ -12,6 +12,48 @@
         "chatSessionId": "sess_6872e9f2-4843-4412-94b9-92c11c17c43e",
         "timestamp": 1786783988490
       }
+    ],
+    "9.1 Author `expected.json` for the successful CPI-heavy case": [
+      {
+        "executionId": "5d8d8482-a51e-4aaf-a313-735d7803292d",
+        "chatSessionId": "sess_6872e9f2-4843-4412-94b9-92c11c17c43e",
+        "timestamp": 1787315322683
+      }
+    ],
+    "9.2 Hand-review the v0 lookup-table half of the same `expected.json`": [
+      {
+        "executionId": "5d8d8482-a51e-4aaf-a313-735d7803292d",
+        "chatSessionId": "sess_6872e9f2-4843-4412-94b9-92c11c17c43e",
+        "timestamp": 1787315332434
+      }
+    ],
+    "9.3 Author `expected.json` for the four error-resolution cases": [
+      {
+        "executionId": "5d8d8482-a51e-4aaf-a313-735d7803292d",
+        "chatSessionId": "sess_6872e9f2-4843-4412-94b9-92c11c17c43e",
+        "timestamp": 1787315345210
+      }
+    ],
+    "9.4 Author `expected.json` for the nested-CPI failure case": [
+      {
+        "executionId": "5d8d8482-a51e-4aaf-a313-735d7803292d",
+        "chatSessionId": "sess_6872e9f2-4843-4412-94b9-92c11c17c43e",
+        "timestamp": 1787315354694
+      }
+    ],
+    "9. Author and hand-review the six pinned `expected.json` ground-truth files": [
+      {
+        "executionId": "5d8d8482-a51e-4aaf-a313-735d7803292d",
+        "chatSessionId": "sess_6872e9f2-4843-4412-94b9-92c11c17c43e",
+        "timestamp": 1787315354769
+      }
+    ],
+    "13.1 Make the golden harness strict for the six pinned fixtures": [
+      {
+        "executionId": "5d8d8482-a51e-4aaf-a313-735d7803292d",
+        "chatSessionId": "sess_6872e9f2-4843-4412-94b9-92c11c17c43e",
+        "timestamp": 1787315408511
+      }
     ]
   }
 }

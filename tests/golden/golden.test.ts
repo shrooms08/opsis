@@ -1,5 +1,5 @@
 /**
- * The golden suite. Requirements 14.1–14.9, 14.11.
+ * The golden suite. Requirements 14.1–14.11.
  *
  * This file is deliberately thin: `./harness.ts` does the work and returns
  * values, and this file turns each value into one vitest test so that a fixture
@@ -10,9 +10,12 @@
  * rather than in an assertion message, which is the difference between an
  * omission a reader sees and one they have to go looking for.
  *
- * Today every fixture is pending: six responses are recorded and no
- * `expected.json` exists yet (task 9 authors them). The suite passes, and it says
- * so in a way that cannot be mistaken for six passing comparisons.
+ * Every fixture is compared. Six responses are recorded, all six are pinned in
+ * `PINNED_FIXTURES`, and all six carry a hand-reviewed `expected.json`, so the run
+ * reports `6 discovered: 6 compared, 0 pending, 0 failed`. Nothing here is
+ * `pending`, and for a pinned directory nothing can be: a missing `expected.json`
+ * is a failure. `pending` remains reachable for a directory recorded later and not
+ * yet hand-reviewed — see `PINNED_FIXTURES` for why both states are load-bearing.
  *
  * Property 42 — the comparator is order-insensitive and value-exact — is task
  * 13.7's, not this file's. The harness's own failure paths are covered by
@@ -26,7 +29,14 @@ import { fileURLToPath } from 'node:url';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { EXPECTED_FILE, pendingReport, runGolden } from './harness.js';
+import {
+  EXPECTED_FILE,
+  GOLDEN_TIME_BUDGET_MS,
+  PINNED_FIXTURES,
+  pendingReport,
+  runGolden,
+  summaryLine,
+} from './harness.js';
 
 const GOLDEN_ROOT = fileURLToPath(new URL('.', import.meta.url));
 
@@ -58,12 +68,40 @@ describe('golden fixtures', () => {
     });
   }
 
+  it(`compares all ${PINNED_FIXTURES.length} pinned fixtures`, () => {
+    // The check that keeps the pinned list honest. A pinned name with no
+    // directory on disk is invisible to discovery, so without this the list
+    // could name six fixtures while enforcing four — the exact shape an earlier
+    // revision had. Comparing name-to-outcome strings rather than booleans so a
+    // failure prints which fixture and what happened to it instead of
+    // `false !== true`.
+    const outcomes = new Map(run.results.map((result) => [result.name, result.outcome]));
+    expect(
+      PINNED_FIXTURES.map((name) => `${name}: ${outcomes.get(name) ?? 'not discovered'}`),
+    ).toEqual(PINNED_FIXTURES.map((name) => `${name}: pass`));
+  });
+
   it(`reports ${run.passed} compared, ${run.pending} pending, 0 failed`, () => {
     expect(run.failed).toBe(0);
     expect(run.passed + run.pending + run.failed).toBe(run.results.length);
   });
 
+  it(`completes in under ${GOLDEN_TIME_BUDGET_MS} ms (Req 14.10)`, () => {
+    // Measured around the fixture loop, so it covers discovery, every file read,
+    // every pipeline run, and every comparison — not the test runner's own
+    // startup, which is not what 14.10 budgets. Typical figure is two orders of
+    // magnitude under, because there is no network, no spawn, no compile, and no
+    // sleep in the suite.
+    expect(run.elapsedMs).toBeLessThan(GOLDEN_TIME_BUDGET_MS);
+  });
+
   afterAll(() => {
+    // Unconditional, and on the passing run too: `6 discovered: 6 compared, 0
+    // pending, 0 failed` is what tells a reader the comparisons happened.
+    process.stdout.write(
+      `\n${summaryLine(run)} in ${run.elapsedMs.toFixed(0)} ms ` +
+        `(Req 14.10 budget ${GOLDEN_TIME_BUDGET_MS} ms)\n`,
+    );
     if (run.pending > 0) {
       // `process.stdout.write`, not `console.log`: vitest intercepts console
       // output and attaches it to the task, and the reporter withholds it on a

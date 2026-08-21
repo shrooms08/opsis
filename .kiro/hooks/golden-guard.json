@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "golden-guard",
+      "description": "Refuses to let a hand-reviewed golden expected.json be rewritten to make a failing test pass.",
+      "trigger": "PreToolUse",
+      "matcher": "fsWrite|applyPatch|createFile",
+      "action": {
+        "type": "agent",
+        "prompt": "STOP and check the target path before writing.\n\nIf the path matches tests/golden/*/expected.json, do not proceed.\n\nAn expected.json is hand-reviewed ground truth. It is never regenerated to make a failing test pass. That single edit is what silently converts a real regression into a green suite, and it is unrecoverable once committed because the evidence of the old behaviour is gone.\n\nIf a golden comparison is failing:\n\n1. Do not touch expected.json.\n2. Report the fixture name, the JSON pointer of each differing leaf, and both values.\n3. Treat the diff as a finding about the code, not about the fixture. If the pipeline changed on purpose, the change needs human review first. The golden file is updated only after that review, deliberately, and never as a side effect of chasing green.\n\nWriting a candidate to expected.json.candidate is allowed. Promoting a candidate to expected.json is a human decision, not an agent's.\n\nIf the write targets anything else, continue normally."
+      }
+    }
+  ]
+}
