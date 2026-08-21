@@ -48,6 +48,17 @@
  * modes**, so an escaped sequence is identical in the two outputs and the
  * equivalence in claim 3 is unaffected by it. The ANSI stripping below matches a
  * real ESC byte only, never the six literal characters `\`, `x`, `1`, `b`, `[`.
+ *
+ * **Recorded deviation: `LOGS` is a fourth section and Requirement 12.1 fixes
+ * three.** It was added on an explicit user request, printing Requirement 21.1's
+ * verbatim log array that the renderer previously reduced to a line count. Three
+ * assertions here moved with it, and two of them changed in kind rather than in
+ * number: the heading set now allows a container confidence marker after a title,
+ * because the `LOGS` heading carries the log collection's marker, and the
+ * label-column assertions exclude the `LOGS` body, because a verbatim log line has
+ * no label and so no column to align to. The section count itself is now derived
+ * from `SECTION_TITLES` rather than written down. Content assertions for the
+ * section live in `text.test.ts`; what is here is layout.
  */
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -101,6 +112,19 @@ function stripAnsi(text: string): string {
 /** Every section, heading included, split at the Requirement 12.1 blank line. */
 function sectionsOf(text: string): readonly string[] {
   return text.split('\n\n');
+}
+
+/**
+ * The output with the `LOGS` section removed.
+ *
+ * For the assertions that are about the label column. That section's body is
+ * verbatim program output, so its lines carry no label and have no column to align
+ * to — see `labelledLines`, which is the only caller.
+ */
+function withoutLogsSection(text: string): string {
+  return sectionsOf(text)
+    .filter((section) => !section.startsWith(SECTION_TITLES.logs))
+    .join('\n\n');
 }
 
 /** Regex-literal form of an arbitrary string. */
@@ -556,13 +580,22 @@ describe('section layout', () => {
       for (const mode of ['off', 'on'] as const) {
         it(`indents every non-heading line, so a heading is unambiguous (color ${mode})`, () => {
           const text = textOf(analysis, mode);
+          // Derived from the renderer's own table, so a new section is picked up
+          // here without an edit — `LOGS` was.
           const headings: readonly string[] = Object.values(SECTION_TITLES);
 
           for (const section of sectionsOf(text)) {
             const lines = section.split('\n');
             const heading = lines[0];
             expect(heading).toBeDefined();
-            expect(headings).toContain(heading);
+            // A heading is its title, optionally followed by the container
+            // confidence marker: `LOGS` carries the log collection's marker on the
+            // heading, because the marker describes the collection and not any one
+            // verbatim line. Stripped rather than matched loosely, so anything
+            // else after a title would still fail.
+            expect(headings).toContain(
+              (heading ?? '').replace(/ {2}\[(?:full|partial|raw)\]$/, ''),
+            );
             for (const line of lines.slice(1)) {
               // Column 0 is reserved for headings and for nothing else.
               expect(stripAnsi(line).startsWith(' ')).toBe(true);
@@ -589,8 +622,10 @@ describe('section layout', () => {
               expect(line).not.toBe('');
             }
           }
-          // Which makes the Requirement 12.1 separator exactly two occurrences.
-          expect(text.split('\n\n')).toHaveLength(3);
+          // Which makes the Requirement 12.1 separator occur exactly once per gap
+          // between sections. Counted off `SECTION_TITLES` rather than written
+          // down, so adding a section does not send anyone back to this line.
+          expect(text.split('\n\n')).toHaveLength(Object.values(SECTION_TITLES).length);
           expect(text).not.toContain('\n\n\n');
         });
 
@@ -640,11 +675,21 @@ describe('section layout', () => {
    * identifier-like label. That excludes instruction headers and account rows,
    * which begin with `#` or `[FAIL]` and separate their tokens by a two-space gap
    * rather than by a column, and it excludes `<not in the account key list>`. The
-   * bare `accounts` line and the three section headings are label-only and shorter
+   * bare `accounts` line and the section headings are label-only and shorter
    * than the column, so the length test drops them: they have no value to align.
+   *
+   * It also excludes the whole `LOGS` body, and that is a judgement rather than a
+   * filter that fell out of the shape. A log line is verbatim program output, not
+   * a `<label><padding><value>` line, and it routinely begins with a letter and
+   * runs past the column — `Program 1111… invoke [1]` would be read as a label
+   * called `Program 111111111111` fused to its value. There is no label column in
+   * that section to align, because there is no label. Dropping the section is the
+   * honest reading of what these two assertions are about; narrowing the line
+   * pattern instead would silently start skipping real labelled lines the day one
+   * of them grew a space.
    */
   function labelledLines(text: string, width: number): readonly Labelled[] {
-    return text
+    return withoutLogsSection(text)
       .split('\n')
       .map((line) => stripAnsi(line))
       .map((line) => line.slice(line.length - line.trimStart().length))

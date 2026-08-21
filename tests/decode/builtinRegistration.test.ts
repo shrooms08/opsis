@@ -1,21 +1,28 @@
 /**
- * Built-in decoder registration: the three program IDs of Requirement 4.4, and
- * the fact that a real payload sent to each of those addresses reaches its
- * decoder.
+ * Built-in decoder registration: the three program IDs of Requirement 4.4 plus
+ * Compute Budget, and the fact that a real payload sent to each of those
+ * addresses reaches its decoder.
  *
  * Requirement 4.4.
  *
+ * **Compute Budget is a fourth built-in beyond the three Requirement 4.4
+ * enumerates**, added because it is the most frequent program on the chain and
+ * `Unknown` was the wrong answer for instructions the tool can read exactly. The
+ * requirement names three and is not restated here as naming four; the fourth
+ * row below is labelled as the addition it is, and every assertion it is subject
+ * to is the same one the other three face.
+ *
  * **Why the addresses are spelled out here instead of imported.** The registry
- * keys its built-in map with `SYSTEM_PROGRAM_ID`, `SPL_TOKEN_PROGRAM_ID`, and
- * `SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID` taken from the decoder modules
- * themselves, which is the right coupling — a decoder and its registration
- * cannot disagree — but it means a typo in one of those constants leaves the
- * map perfectly self-consistent. The decoder would be registered under the
- * typo'd address and looked up under the same typo'd address, so a test that
- * imported the constant would pass while no mainnet instruction ever reached
- * the decoder again. The only test that can catch that is one that states the
- * canonical addresses independently, so the three literals below are typed out
- * from Requirement 4.4 and this file imports no program ID from `src/`.
+ * keys its built-in map with `SYSTEM_PROGRAM_ID`, `SPL_TOKEN_PROGRAM_ID`,
+ * `SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID`, and `COMPUTE_BUDGET_PROGRAM_ID`
+ * taken from the decoder modules themselves, which is the right coupling — a
+ * decoder and its registration cannot disagree — but it means a typo in one of
+ * those constants leaves the map perfectly self-consistent. The decoder would be
+ * registered under the typo'd address and looked up under the same typo'd
+ * address, so a test that imported the constant would pass while no mainnet
+ * instruction ever reached the decoder again. The only test that can catch that
+ * is one that states the canonical addresses independently, so the four literals
+ * below are typed out by hand and this file imports no program ID from `src/`.
  *
  * Three assertions per program, each catching a different way the registration
  * can be wrong:
@@ -38,8 +45,8 @@
  * answers `no-match` is indistinguishable at the registry surface from a
  * decoder that was never registered — both produce `Unknown`. Each payload is
  * built from the encoding its own module documents: a 4-byte little-endian
- * variant tag for the System Program, a single tag byte for SPL Token and for
- * the Associated Token Account program.
+ * variant tag for the System Program, a single tag byte for SPL Token, for the
+ * Associated Token Account program, and for Compute Budget.
  *
  * The precedence ladder is not retested here; `registry.test.ts` owns it. This
  * file is only about which addresses the built-in rung answers for.
@@ -48,6 +55,7 @@
 import bs58 from 'bs58';
 import { describe, expect, it } from 'vitest';
 
+import { computeBudgetDecoder } from '../../src/decode/builtin/computeBudget.js';
 import { splAssociatedTokenAccountDecoder } from '../../src/decode/builtin/splAssociatedTokenAccount.js';
 import { splTokenDecoder } from '../../src/decode/builtin/splToken.js';
 import { systemProgramDecoder } from '../../src/decode/builtin/systemProgram.js';
@@ -63,6 +71,9 @@ const CANONICAL_SPL_TOKEN_PROGRAM_ID: Base58Address =
   'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const CANONICAL_SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID: Base58Address =
   'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
+/** Not one of Requirement 4.4's three; see the module header. */
+const CANONICAL_COMPUTE_BUDGET_PROGRAM_ID: Base58Address =
+  'ComputeBudget111111111111111111111111111111';
 
 /** Every Solana program ID is a 32-byte ed25519 public key or program address. */
 const ADDRESS_BYTES = 32;
@@ -115,6 +126,15 @@ const SPL_TOKEN_TRANSFER = concat(new Uint8Array([3]), le(11n, 8));
  */
 const ATA_CREATE_IDEMPOTENT = new Uint8Array([1]);
 
+/**
+ * A Compute Budget `SetComputeUnitPrice`: the tag byte 3, then a u64
+ * little-endian micro-lamport price. Tag 3 rather than tag 2 on purpose — its
+ * payload is eight bytes rather than four, so a decoder that had the tag right
+ * and the width wrong would report a `partial` with four unexplained trailing
+ * bytes instead of the `full` this case demands.
+ */
+const COMPUTE_BUDGET_SET_UNIT_PRICE = concat(new Uint8Array([3]), le(59_214n, 8));
+
 // ---------------------------------------------------------------------------
 // Narrowing
 // ---------------------------------------------------------------------------
@@ -164,6 +184,13 @@ const CASES: readonly BuiltinCase[] = [
     payload: ATA_CREATE_IDEMPOTENT,
     instructionName: 'CreateIdempotent',
   },
+  {
+    label: 'Compute Budget',
+    canonicalAddress: CANONICAL_COMPUTE_BUDGET_PROGRAM_ID,
+    decoder: computeBudgetDecoder,
+    payload: COMPUTE_BUDGET_SET_UNIT_PRICE,
+    instructionName: 'SetComputeUnitPrice',
+  },
 ];
 
 describe.each(CASES)('$label built-in decoder', (testCase: BuiltinCase) => {
@@ -199,11 +226,11 @@ describe.each(CASES)('$label built-in decoder', (testCase: BuiltinCase) => {
 });
 
 // ---------------------------------------------------------------------------
-// The three registrations are three distinct registrations
+// Each registration is a distinct registration
 // ---------------------------------------------------------------------------
 
-describe('the three built-in registrations', () => {
-  it('cover three pairwise distinct addresses', () => {
+describe('the built-in registrations', () => {
+  it('cover pairwise distinct addresses', () => {
     // A copy-paste that gave two decoders the same program ID would register one
     // of them over the other, leaving the displaced program silently undecoded
     // while both `programId` assertions above still passed.
@@ -212,7 +239,7 @@ describe('the three built-in registrations', () => {
     expect(new Set(addresses).size).toBe(CASES.length);
   });
 
-  it('cover three distinct decoders', () => {
+  it('cover distinct decoders', () => {
     const decoders = CASES.map((testCase) => testCase.decoder);
 
     expect(new Set(decoders).size).toBe(CASES.length);

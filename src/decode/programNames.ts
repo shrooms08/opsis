@@ -30,12 +30,15 @@
  * `programName` through untouched, and `analyze/assemble.ts` propagates
  * confidence from the decode markers.
  *
- * **Addresses.** System Program, SPL Token, and SPL Associated Token Account are
- * imported from their built-in decoder modules rather than re-spelled, so this
- * table and the decoder registration cannot drift apart — the same discipline
- * `registry.ts` and `resolve/errorResolver.ts` already apply. The remaining three
- * programs are new to the codebase and have nowhere to import from, so they are
- * literals here; `tests/decode/programNames.test.ts` asserts every one of the six
+ * **Addresses.** System Program, SPL Token, SPL Associated Token Account, and
+ * Compute Budget are imported from their built-in decoder modules rather than
+ * re-spelled, so this table and the decoder registration cannot drift apart —
+ * the same discipline `registry.ts` and `resolve/errorResolver.ts` already
+ * apply. The import runs decoder → here and never the other way: this module is
+ * display labelling and must stay off the decode path, so the module that owns
+ * the decoder owns the address too. The remaining two programs have no built-in
+ * decoder to import from, so they are literals here;
+ * `tests/decode/programNames.test.ts` asserts every one of the six
  * base58-decodes to exactly 32 bytes, because a transposed character that stays
  * inside the base58 alphabet produces an entry that silently never matches and a
  * program that silently never gets a name.
@@ -53,6 +56,7 @@
  */
 
 import type { Base58Address } from '../model/analysis.js';
+import { COMPUTE_BUDGET_PROGRAM_ID } from './builtin/computeBudget.js';
 import { SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID } from './builtin/splAssociatedTokenAccount.js';
 import { SPL_TOKEN_PROGRAM_ID } from './builtin/splToken.js';
 import { SYSTEM_PROGRAM_ID } from './builtin/systemProgram.js';
@@ -67,9 +71,6 @@ import { SYSTEM_PROGRAM_ID } from './builtin/systemProgram.js';
  * claim about the payload.
  */
 const TOKEN_2022_PROGRAM_ID: Base58Address = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
-
-/** Compute Budget (`ComputeBudget111111111111111111111111111111`). */
-const COMPUTE_BUDGET_PROGRAM_ID: Base58Address = 'ComputeBudget111111111111111111111111111111';
 
 /**
  * Memo (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`) — the current program.

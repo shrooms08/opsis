@@ -20,6 +20,15 @@
  *   the shape the renderer actually has to handle, and it is where a malformed
  *   assumption about a variant that no synthetic sample happens to contain would
  *   surface.
+ *
+ * **Recorded deviation: the `LOGS` section is a fourth section and Requirement
+ * 12.1 fixes three.** It was added on an explicit user request, printing
+ * Requirement 21.1's verbatim array that the renderer previously reduced to a line
+ * count. The structural assertions below therefore derive the section count and
+ * the heading order from `SECTION_TITLES` rather than writing down a number, so
+ * the next section added does not send anyone back here. The `LOGS` heading
+ * carries the collection's confidence marker, which is why the heading assertions
+ * strip a trailing marker before comparing.
  */
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -29,14 +38,22 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { createIdlDecoder } from '../../src/decode/idl/idlDecoder.js';
 import { loadIdlDirectory, type LoadedIdl } from '../../src/decode/idl/idlStore.js';
-import type { AccountRef, Analysis, InstructionNode, TokenAmount } from '../../src/model/analysis.js';
+import type {
+  AccountRef,
+  Analysis,
+  InstructionNode,
+  LogReport,
+  TokenAmount,
+} from '../../src/model/analysis.js';
 import type { RawTransactionResponse } from '../../src/model/rawResponse.js';
 import { analyzeTransaction } from '../../src/pipeline.js';
 import {
+  BLANK_LOG_LINE_MARKER,
   CATEGORY_COLORS,
   COLOR_CATEGORIES,
   createPalette,
   decideColorMode,
+  EMPTY_LOG_LINE_MARKER,
   EMPTY_NAME_MARKER,
   ERROR_MARKER,
   FAIL_MARKER,
@@ -84,6 +101,37 @@ function treeLines(text: string): readonly (readonly [number, number])[] {
     .map((line) => /^( *)(?:\[FAIL\] )?#(\d+) .* {2}decode \[/.exec(stripAnsi(line)))
     .filter((match): match is RegExpExecArray => match !== null)
     .map((match) => [(match[1] as string).length, Number(match[2])] as const);
+}
+
+/** The section headings in the order the renderer emits them. */
+const SECTION_ORDER: readonly string[] = Object.values(SECTION_TITLES);
+
+/** A container confidence marker at the end of a heading, which `LOGS` carries. */
+const HEADING_MARKER = / {2}\[(?:full|partial|raw)\]$/;
+
+/**
+ * Each section's heading, with a container marker stripped.
+ *
+ * Stripped rather than matched loosely, so a heading that carried anything else
+ * after its title would still fail the comparison.
+ */
+function headingsOf(text: string): readonly string[] {
+  return text
+    .split('\n\n')
+    .map((section) => stripAnsi(section.split('\n')[0] ?? ''))
+    .map((heading) => heading.replace(HEADING_MARKER, ''));
+}
+
+/** The body lines of the section with the given title, indent removed. */
+function sectionBody(text: string, title: string): readonly string[] {
+  const section = text
+    .split('\n\n')
+    .find((candidate) => stripAnsi(candidate).split('\n')[0]?.startsWith(title) === true);
+  if (section === undefined) throw new Error(`no ${title} section in the output`);
+  return section
+    .split('\n')
+    .slice(1)
+    .map((line) => line.replace(/^ {2}/, ''));
 }
 
 const NON_TTY = { env: {}, isTty: false } as const;
@@ -314,20 +362,30 @@ function sampleAnalysis(): Analysis {
 // ---------------------------------------------------------------------------
 
 describe('sections', () => {
-  it('emits the three labelled sections, in order, separated by one blank line', () => {
-    const sections = textOf(sampleAnalysis()).split('\n\n');
+  it('emits every labelled section, in order, separated by one blank line', () => {
+    const text = textOf(sampleAnalysis());
+    const sections = text.split('\n\n');
 
-    expect(sections).toHaveLength(3);
-    expect(sections[0]?.split('\n')[0]).toBe(SECTION_TITLES.metadata);
-    expect(sections[1]?.split('\n')[0]).toBe(SECTION_TITLES.instructions);
-    expect(sections[2]?.split('\n')[0]).toBe(SECTION_TITLES.accounts);
+    // Derived, not written down: one section per entry of `SECTION_TITLES`, in the
+    // order that object declares, which is the order the renderer emits.
+    expect(sections).toHaveLength(SECTION_ORDER.length);
+    expect(headingsOf(text)).toEqual(SECTION_ORDER);
+    // And the position the request fixes: logs after the tree, accounts last.
+    expect(SECTION_ORDER).toEqual([
+      SECTION_TITLES.metadata,
+      SECTION_TITLES.instructions,
+      SECTION_TITLES.logs,
+      SECTION_TITLES.accounts,
+    ]);
   });
 
   it('emits no empty line inside a section, so the separation is unambiguous', () => {
     const text = textOf(sampleAnalysis());
 
-    // Exactly two blank-line separators, and none of them tripled.
-    expect(text.split('\n').filter((line) => line === '')).toHaveLength(2);
+    // One blank-line separator per gap between sections, and none of them tripled.
+    expect(text.split('\n').filter((line) => line === '')).toHaveLength(
+      SECTION_ORDER.length - 1,
+    );
     expect(text).not.toContain('\n\n\n');
     expect(text.startsWith('\n')).toBe(false);
     expect(text.endsWith('\n')).toBe(false);
@@ -357,6 +415,204 @@ describe('sections', () => {
 
     expect(JSON.stringify(analysis)).toBe(before);
   });
+});
+
+// ---------------------------------------------------------------------------
+// The LOGS section — Requirement 21.1, printed on user request
+// ---------------------------------------------------------------------------
+
+/**
+ * The captured log lines, on screen.
+ *
+ * A fourth section where Requirement 12.1 fixes three — the deviation recorded in
+ * the module header of this file and of `render/text.ts`. What is pinned here is
+ * placement, order, the container marker on the heading, the three degraded
+ * states told apart, and the escaping, which matters more here than anywhere else
+ * in the output: a log message is program-controlled bytes and it is the one
+ * string long enough and free-form enough to hide an injection in.
+ */
+describe('the LOGS section', () => {
+  /** The sample with its log report replaced. */
+  function withLogs(logs: LogReport): Analysis {
+    return { ...sampleAnalysis(), logs };
+  }
+
+  const PLAIN: LogReport = {
+    messages: [
+      'Program 11111111111111111111111111111111 invoke [1]',
+      'Program log: Instruction: Transfer',
+      'Program 11111111111111111111111111111111 success',
+    ],
+    present: true,
+    truncated: false,
+    unattributed: [],
+    confidence: 'full',
+  };
+
+  it('sits immediately after INSTRUCTIONS and before ACCOUNTS', () => {
+    const headings = headingsOf(textOf(withLogs(PLAIN)));
+
+    expect(headings.indexOf(SECTION_TITLES.logs)).toBe(
+      headings.indexOf(SECTION_TITLES.instructions) + 1,
+    );
+    expect(headings.indexOf(SECTION_TITLES.accounts)).toBe(
+      headings.indexOf(SECTION_TITLES.logs) + 1,
+    );
+  });
+
+  it('prints every message in RPC order, one line each, and nothing else', () => {
+    const body = sectionBody(textOf(withLogs(PLAIN)), SECTION_TITLES.logs);
+
+    // Un-indented, the body is the array: same lines, same order, same count. No
+    // sorting, no grouping, no deduplication, no renumbering.
+    expect(body).toEqual([...PLAIN.messages]);
+  });
+
+  it('keeps a duplicated message rather than collapsing it', () => {
+    const repeated = 'Program log: Instruction: Transfer';
+    const body = sectionBody(
+      textOf(withLogs({ ...PLAIN, messages: [repeated, repeated] })),
+      SECTION_TITLES.logs,
+    );
+
+    expect(body).toEqual([repeated, repeated]);
+  });
+
+  it('indents every line and preserves whitespace the message begins with', () => {
+    const inner = '    Program log: nested by the runtime';
+    const text = textOf(withLogs({ ...PLAIN, messages: [inner] }));
+    const line = text.split('\n').find((candidate) => candidate.includes('nested by'));
+
+    // Two spaces of section indent, then the message's own four, untouched.
+    expect(line).toBe(`  ${inner}`);
+  });
+
+  for (const confidence of ['full', 'partial', 'raw'] as const) {
+    it(`carries the container marker [${confidence}] on the heading, not on the lines`, () => {
+      const text = textOf(withLogs({ ...PLAIN, confidence }));
+      const section = text
+        .split('\n\n')
+        .find((candidate) => candidate.startsWith(SECTION_TITLES.logs));
+      expect(section).toBeDefined();
+      if (section === undefined) return;
+
+      expect(section.split('\n')[0]).toBe(`${SECTION_TITLES.logs}  [${confidence}]`);
+      // The collection carries the marker; a verbatim line makes no claim.
+      for (const line of section.split('\n').slice(1)) {
+        expect(line).not.toMatch(/\[(?:full|partial|raw)\]/);
+      }
+    });
+  }
+
+  it('escapes a control character instead of letting it reach the terminal', () => {
+    // Three attacks in one message: a forged color, a fabricated line, an erased
+    // one. All of them are one line of visible `\xNN` text on the way out.
+    const hostile = `Program log: ${ESC}[31m[ERROR] forged${ESC}[0m\nProgram log: fabricated\rerased`;
+    const body = sectionBody(
+      textOf(withLogs({ ...PLAIN, messages: [hostile] })),
+      SECTION_TITLES.logs,
+    );
+
+    expect(body).toHaveLength(1);
+    const line = body[0] ?? '';
+    expect(line).not.toContain(ESC);
+    expect(line).not.toContain('\n');
+    expect(line).not.toContain('\r');
+    expect(line).toContain('\\x1b[31m');
+    expect(line).toContain('\\x0a');
+    expect(line).toContain('\\x0d');
+    // And the whole message is still legible, byte for byte, as text.
+    expect(line).toBe(
+      'Program log: \\x1b[31m[ERROR] forged\\x1b[0m\\x0aProgram log: fabricated\\x0derased',
+    );
+  });
+
+  it('marks an empty message rather than emitting a line that is not there', () => {
+    const text = textOf(withLogs({ ...PLAIN, messages: ['first', '', 'third'] }));
+    const body = sectionBody(text, SECTION_TITLES.logs);
+
+    // The line stays present and countable, and it is not a blank line — which
+    // would split the section in two — nor whitespace, which would be invisible.
+    expect(body).toEqual(['first', EMPTY_LOG_LINE_MARKER, 'third']);
+    expect(text.split('\n').filter((line) => line.trim() === '')).toHaveLength(
+      SECTION_ORDER.length - 1,
+    );
+  });
+
+  it('marks a whitespace-only message and states its length', () => {
+    const body = sectionBody(
+      textOf(withLogs({ ...PLAIN, messages: ['   '] })),
+      SECTION_TITLES.logs,
+    );
+
+    // A separate fact from the empty message: there is content, it is invisible.
+    expect(body).toEqual([`${BLANK_LOG_LINE_MARKER}  3 characters`]);
+  });
+
+  it('says the log was recorded and empty when present is true and messages are none', () => {
+    const body = sectionBody(
+      textOf(withLogs({ ...PLAIN, messages: [] })),
+      SECTION_TITLES.logs,
+    );
+
+    expect(body).toHaveLength(1);
+    expect(body[0]).toContain('recorded and held no line');
+  });
+
+  it('says no log output was recorded when the field was absent, at raw', () => {
+    const text = textOf(
+      withLogs({ messages: [], present: false, truncated: false, unattributed: [], confidence: 'raw' }),
+    );
+    const body = sectionBody(text, SECTION_TITLES.logs);
+
+    // The section appears rather than vanishing: an absent record and an empty one
+    // are different facts, and a missing section would state neither.
+    expect(headingsOf(text)).toContain(SECTION_TITLES.logs);
+    expect(body).toHaveLength(1);
+    expect(body[0]).toContain('no log output was recorded');
+    // And the two empty states do not render alike.
+    expect(body).not.toEqual(
+      sectionBody(textOf(withLogs({ ...PLAIN, messages: [] })), SECTION_TITLES.logs),
+    );
+  });
+
+  it('prints every recorded line of a truncated log and marks the collection partial', () => {
+    const text = textOf(withLogs({ ...PLAIN, truncated: true, confidence: 'partial' }));
+    const body = sectionBody(text, SECTION_TITLES.logs);
+
+    expect(body).toEqual([...PLAIN.messages]);
+    expect(text.split('\n')[0]).toBe(SECTION_TITLES.metadata);
+    expect(headingsOf(text)).toContain(SECTION_TITLES.logs);
+    expect(text).toContain(`${SECTION_TITLES.logs}  [partial]`);
+    // The truncation itself stays on the TRANSACTION row, which is where the line
+    // count and the unattributed count are.
+    const metadata = text.split('\n\n')[0] ?? '';
+    expect(metadata).toContain('(truncated)');
+  });
+
+  it('keeps the TRANSACTION summary row, which the section does not restate', () => {
+    const text = textOf(withLogs(PLAIN));
+    const metadata = text.split('\n\n')[0] ?? '';
+
+    expect(metadata).toContain('3 lines');
+  });
+
+  for (const recorded of goldenCases()) {
+    it(`prints the recorded log lines of ${recorded.name} verbatim and in order`, () => {
+      const analysis = analysisOf(recorded.document);
+      const body = sectionBody(textOf(analysis), SECTION_TITLES.logs);
+
+      // Real chain data, not a synthetic string: every recorded line, in the order
+      // the RPC gave them.
+      expect(analysis.logs.messages.length).toBeGreaterThan(0);
+      expect(body).toEqual([...analysis.logs.messages]);
+
+      // Pinned against one real line, so the section cannot pass by being empty.
+      const first = analysis.logs.messages[0] ?? '';
+      expect(first).toContain('invoke [1]');
+      expect(textOf(analysis)).toContain(`\n  ${first}\n`);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1034,11 +1290,9 @@ describe('over the recorded fixtures, through the real pipeline', () => {
         if (!rendered.ok) return;
 
         const text = rendered.text;
-        const sections = text.split('\n\n');
-        expect(sections).toHaveLength(3);
-        expect(sections[0]?.split('\n')[0]).toBe(SECTION_TITLES.metadata);
-        expect(sections[1]?.split('\n')[0]).toBe(SECTION_TITLES.instructions);
-        expect(sections[2]?.split('\n')[0]).toBe(SECTION_TITLES.accounts);
+        // One section per `SECTION_TITLES` entry, in that order, over real data.
+        expect(text.split('\n\n')).toHaveLength(SECTION_ORDER.length);
+        expect(headingsOf(text)).toEqual(SECTION_ORDER);
 
         expect(text).toContain(analysis.signature);
         expect(text).toContain(analysis.messageVersion);

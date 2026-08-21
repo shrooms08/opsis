@@ -6,9 +6,10 @@
  *
  * **The table itself.** The six canonical addresses are transcribed here as
  * literals and this file imports no program ID from `src/`, for the same reason
- * `builtinRegistration.test.ts` transcribes its three: `programNames.ts` imports
- * `SYSTEM_PROGRAM_ID`, `SPL_TOKEN_PROGRAM_ID`, and
- * `SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID` from the decoder modules, which is
+ * `builtinRegistration.test.ts` transcribes its own: `programNames.ts` imports
+ * `SYSTEM_PROGRAM_ID`, `SPL_TOKEN_PROGRAM_ID`,
+ * `SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID`, and `COMPUTE_BUDGET_PROGRAM_ID`
+ * from the decoder modules, which is
  * the right coupling — the name table and the decoder registration cannot drift
  * — but it also means a typo in one of those constants leaves the table
  * perfectly self-consistent while no mainnet instruction ever matches it. Only a
@@ -50,6 +51,7 @@ import bs58 from 'bs58';
 import { describe, expect, it } from 'vitest';
 
 import { resolveAccountKeys } from '../../src/decode/accountKeys.js';
+import { COMPUTE_BUDGET_PROGRAM_ID } from '../../src/decode/builtin/computeBudget.js';
 import { SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID } from '../../src/decode/builtin/splAssociatedTokenAccount.js';
 import { SPL_TOKEN_PROGRAM_ID } from '../../src/decode/builtin/splToken.js';
 import { SYSTEM_PROGRAM_ID } from '../../src/decode/builtin/systemProgram.js';
@@ -145,16 +147,21 @@ describe('the program name table', () => {
     expect(new Set(PROGRAM_NAMES.values()).size).toBe(CASES.length);
   });
 
-  it('takes its three shared addresses from the built-in decoder modules', () => {
+  it('takes its four shared addresses from the built-in decoder modules', () => {
     // The imported constants are the table's keys, so if one of them drifted
     // from the canonical literal the table would silently stop matching that
     // program. Asserted at the constant rather than through the table so the
     // failure names which one moved.
+    //
+    // Compute Budget joined this list when it gained a built-in decoder: the
+    // address moved out of this module and into `decode/builtin/computeBudget.ts`
+    // so that the decoder registration and the display label cannot disagree.
     expect(SYSTEM_PROGRAM_ID).toBe(CANONICAL_SYSTEM_PROGRAM_ID);
     expect(SPL_TOKEN_PROGRAM_ID).toBe(CANONICAL_SPL_TOKEN_PROGRAM_ID);
     expect(SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID).toBe(
       CANONICAL_SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID,
     );
+    expect(COMPUTE_BUDGET_PROGRAM_ID).toBe(CANONICAL_COMPUTE_BUDGET_PROGRAM_ID);
   });
 
   it('returns null for a program it does not list', () => {

@@ -4,9 +4,21 @@
  * Satisfies Requirement 12 (12.1–12.9), and consumes `render/decimal.ts` for
  * 12.5 and 12.10–12.14.
  *
- * Three labelled sections — transaction metadata, instruction tree, account
- * state — separated by exactly one blank line (Req 12.1), with two spaces of
- * indentation per tree level inside the instruction section (Req 12.2).
+ * Four labelled sections — transaction metadata, instruction tree, captured log
+ * output, account state — separated by exactly one blank line (Req 12.1), with
+ * two spaces of indentation per tree level inside the instruction section
+ * (Req 12.2).
+ *
+ * **Deviation, user-directed: Requirement 12.1 fixes three sections and log
+ * output is not one of them.** The `LOGS` section is a fourth, added on an
+ * explicit request, and it sits between `INSTRUCTIONS` and `ACCOUNTS` so the
+ * account table stays the closing reference the reader scrolls back to. Nothing
+ * else about 12.1 changes: the sections are still labelled, still ordered, and
+ * still separated by exactly one blank line, and no section body contains a blank
+ * line — which is why `SECTION_TITLES` is exported and why a test derives the
+ * section count from it rather than writing down a number that the next section
+ * would falsify. Requirement 21.1's verbatim array is now on screen as well as in
+ * the JSON output, which is what the tool exists to explain.
  *
  * ## A sink, and nothing else
  *
@@ -74,13 +86,20 @@
  * (escaped per RFC 8259). It is what makes "color off emits no ESC" true for
  * every input rather than for the inputs recorded so far.
  *
+ * The log lines are chain data like any other free-form string and go through
+ * `escapeControls` too. "Verbatim" in Requirement 21.1 means the renderer does
+ * not editorialise — no wrapping, no truncation, no reordering, no renumbering,
+ * no re-indenting of the inner text — not that a program's bytes are handed
+ * unexamined to a terminal. An unescaped log message is the most direct injection
+ * path in the whole output: a bare `\n` fabricates a line Opsis never claimed, a
+ * `\r` erases one it did, and an ESC forges a color or a marker.
+ *
  * ## What is not rendered
  *
- * The verbatim log array (Req 21.1) is reported as a line count, not printed.
- * Requirement 12.1 fixes three sections and log output is not one of them; the
- * lines themselves are in the JSON output, byte for byte. Per-line log
- * attribution and CPI failure attribution are Phase 2 upstream, so there is
- * nothing here to place them next to.
+ * Per-line log attribution and CPI failure attribution are Phase 2 upstream, so
+ * there is nothing here to place them next to; `logs.unattributed` is empty in v1
+ * by deferral and is reported as a count on the `TRANSACTION` row rather than as
+ * a second copy of lines the `LOGS` section already prints.
  */
 
 import pc from 'picocolors';
@@ -313,6 +332,38 @@ export const UNNAMED_MARKER = '<unnamed>';
  */
 export const EMPTY_NAME_MARKER = '<empty name>';
 
+/**
+ * A recorded log message of zero length.
+ *
+ * Reachable: `meta.logMessages` is a JSON array of program-controlled strings and
+ * `""` is a legal element, carried into `LogReport.messages` verbatim because the
+ * pipeline filters no line (Req 21.1).
+ *
+ * Printed as a marker rather than as itself, for a layout reason that is also an
+ * honesty reason. An empty message indented would be a line of nothing but
+ * whitespace, and trimmed it would be a bare empty line — which is the one thing
+ * a section body may not contain, because the blank line is what separates the
+ * sections (Req 12.1). So an empty message would either corrupt the section
+ * structure or vanish, and a vanished line would leave the `LOGS` section holding
+ * fewer lines than the count on the `TRANSACTION` row. The marker keeps the line
+ * present, keeps it countable, and says what it is.
+ */
+export const EMPTY_LOG_LINE_MARKER = '<empty log line>';
+
+/**
+ * A recorded log message that is entirely whitespace and not empty.
+ *
+ * A separate fact from `EMPTY_LOG_LINE_MARKER` and so a separate marker, on the
+ * `UNNAMED_MARKER`/`EMPTY_NAME_MARKER` precedent: this one has content, the
+ * content is just invisible. The character count follows it, because that is the
+ * whole of what was recorded and it is not otherwise readable.
+ *
+ * Tab, CR, LF, and every other C0 control are escaped to visible `\xNN` text
+ * before this is consulted, so the only characters that can reach it are spaces
+ * and the non-ASCII blanks.
+ */
+export const BLANK_LOG_LINE_MARKER = '<blank log line>';
+
 function identity(text: string): string {
   return text;
 }
@@ -455,7 +506,20 @@ const REQUIRED_FIELDS: readonly (readonly [
   ['/compute/total', isRecord, 'an object'],
   ['/logs', isRecord, 'an object'],
   ['/logs/messages', Array.isArray, 'an array'],
+  // Two rows for one field, because the array-ness and the element type are two
+  // different malformations and a reader of the diagnostic wants to know which.
+  // The element check earns its place now that the lines are printed: before, a
+  // non-string element only ever reached `.length`, and now it would reach
+  // `escapeControls` and either throw a `TypeError` or — for an object with a
+  // `replace` of its own — put something unaccountable on screen. Either way the
+  // Requirement 12.7 failure is the right answer and this is where the table
+  // gives it, ahead of any output.
+  ['/logs/messages', isArrayOfStrings, 'an array of strings'],
 ];
+
+function isArrayOfStrings(value: unknown): boolean {
+  return Array.isArray(value) && value.every((element: unknown) => typeof element === 'string');
+}
 
 /** The value at a `/`-separated pointer, or `undefined` if the path is absent. */
 function valueAt(root: unknown, path: string): unknown {
@@ -508,10 +572,19 @@ const LABEL_WIDTH = 21;
 /** Two spaces between adjacent tokens on one line; one space would read as one token. */
 const GAP = '  ';
 
-/** The three section headings, exported so a test names them rather than guessing. */
+/**
+ * The section headings, in output order, exported so a test names them — and
+ * counts them — rather than guessing.
+ *
+ * `logs` is the user-directed fourth section recorded in the module header. It is
+ * declared here between `instructions` and `accounts` because that is where it is
+ * emitted, so `Object.values` is the output order and not a second thing to keep
+ * in step.
+ */
 export const SECTION_TITLES = {
   metadata: 'TRANSACTION',
   instructions: 'INSTRUCTIONS',
+  logs: 'LOGS',
   accounts: 'ACCOUNTS',
 } as const;
 
@@ -664,16 +737,19 @@ interface Context {
 // ---------------------------------------------------------------------------
 
 /**
- * The three sections, joined by exactly one blank line (Req 12.1).
+ * Every section, joined by exactly one blank line (Req 12.1).
  *
- * No section body contains an empty line, so `\n\n` occurs exactly twice in the
- * output and a reader — or a test — can split on it to recover the sections.
+ * No section body contains an empty line, so `\n\n` occurs exactly once per gap
+ * between sections and a reader — or a test — can split on it to recover them.
+ * The `LOGS` section is the deviation recorded in the module header; its position
+ * here is the one place that decides the order.
  */
 function renderSections(analysis: Analysis, palette: Palette, mode: ColorMode): string {
   const context: Context = { palette, mode };
   return [
     metadataSection(analysis, context),
     instructionsSection(analysis, context),
+    logsSection(analysis.logs),
     accountsSection(analysis, context),
   ]
     .map((lines) => lines.join('\n'))
@@ -977,6 +1053,75 @@ function accountRefLines(
     );
   }
   return lines;
+}
+
+// --- captured log output ---------------------------------------------------
+
+/**
+ * The recorded log lines, in RPC order (Req 21.1).
+ *
+ * **The marker is on the heading, not on the lines.** `LogReport.confidence`
+ * describes the collection — `full` when present and untruncated, `partial` when
+ * truncated, `raw` when the field was absent — and an individual verbatim copy
+ * makes no claim that could be partial. A marker on every line would repeat one
+ * fact per line and would imply a per-line judgement the model does not carry, so
+ * it goes on the container, which is what the container is.
+ *
+ * No sorting, no grouping, no deduplication, no renumbering, and no line is
+ * dropped: `messages[i]` is the `i`-th body line of this section, so the reader
+ * can count them against the `TRANSACTION` row's total.
+ *
+ * `truncated` is not restated here. It is on the `TRANSACTION` row together with
+ * the line count and the unattributed count, and it is already visible in this
+ * heading as a `[partial]` marker.
+ *
+ * The three states below are three different facts and read differently on
+ * purpose. `present: false` is the recorded absence of the field (Req 21.6) and
+ * says so at `raw` — the section appears rather than disappearing, because a
+ * silently absent section is indistinguishable from a transaction that genuinely
+ * logged nothing, and an absent record and an empty one are exactly what honest
+ * degradation must keep apart. `present: true` with no messages is the other one:
+ * the field was there and held nothing.
+ */
+function logsSection(logs: LogReport): readonly string[] {
+  const lines: string[] = [`${SECTION_TITLES.logs}${GAP}${marker(logs.confidence)}`];
+
+  if (!logs.present) {
+    lines.push(field(1, 'none', 'no log output was recorded for this transaction'));
+    return lines;
+  }
+  if (logs.messages.length === 0) {
+    lines.push(field(1, 'none', 'the log was recorded and held no line'));
+    return lines;
+  }
+
+  for (const message of logs.messages) {
+    lines.push(`${indent(1)}${logLineText(message)}`);
+  }
+  return lines;
+}
+
+/**
+ * One log message, as one line of body text.
+ *
+ * Escaped and otherwise untouched. The indent is a prefix and nothing else is
+ * added, so a message that begins with spaces — Solana's own CPI logs are indented
+ * by the runtime — keeps its own leading whitespace after the two-space section
+ * indent, and a message that contains a `\n` becomes the visible text `\x0a` on
+ * one line rather than two lines the transaction never emitted.
+ *
+ * The two blank cases are markers. `escaped === ''` can only come from a message
+ * that was already empty, and `escaped.trim() === ''` beyond that can only be
+ * spaces and non-ASCII blanks, every control character having become `\xNN` text
+ * first — so `escaped.length` in that branch is the recorded message's own length.
+ */
+function logLineText(message: string): string {
+  const escaped = escapeControls(message);
+  if (escaped === '') return EMPTY_LOG_LINE_MARKER;
+  if (escaped.trim() === '') {
+    return `${BLANK_LOG_LINE_MARKER}${GAP}${integerText(escaped.length)} characters`;
+  }
+  return escaped;
 }
 
 // --- account state ---------------------------------------------------------

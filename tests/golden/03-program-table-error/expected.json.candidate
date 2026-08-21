@@ -286,19 +286,21 @@
         "available": false,
         "confidence": "raw"
       },
-      "confidence": "partial",
+      "confidence": "full",
       "decode": {
-        "confidence": "raw",
-        "errorDetail": "no decoder or Anchor IDL is registered for program ComputeBudget111111111111111111111111111111",
-        "kind": "raw",
-        "name": "Unknown",
-        "note": "Unknown program: no built-in decoder or Anchor IDL resolved this instruction, so the raw data is preserved unmodified",
-        "rawInstructionData": {
-          "byteLength": 9,
-          "hex": "0x03e803000000000000",
-          "label": "raw_instruction_data",
-          "truncated": false
-        }
+        "confidence": "full",
+        "fields": [
+          {
+            "name": "microLamports",
+            "value": {
+              "type": "u64",
+              "value": "1000"
+            }
+          }
+        ],
+        "kind": "full",
+        "name": "SetComputeUnitPrice",
+        "source": "builtin"
       },
       "depth": 0,
       "failed": false,
@@ -317,19 +319,21 @@
         "available": false,
         "confidence": "raw"
       },
-      "confidence": "partial",
+      "confidence": "full",
       "decode": {
-        "confidence": "raw",
-        "errorDetail": "no decoder or Anchor IDL is registered for program ComputeBudget111111111111111111111111111111",
-        "kind": "raw",
-        "name": "Unknown",
-        "note": "Unknown program: no built-in decoder or Anchor IDL resolved this instruction, so the raw data is preserved unmodified",
-        "rawInstructionData": {
-          "byteLength": 5,
-          "hex": "0x02e0930400",
-          "label": "raw_instruction_data",
-          "truncated": false
-        }
+        "confidence": "full",
+        "fields": [
+          {
+            "name": "units",
+            "value": {
+              "type": "u32",
+              "value": 300000
+            }
+          }
+        ],
+        "kind": "full",
+        "name": "SetComputeUnitLimit",
+        "source": "builtin"
       },
       "depth": 0,
       "failed": false,

@@ -84,6 +84,7 @@ import type {
   RawData,
 } from '../model/analysis.js';
 import type { RawInstruction } from '../model/rawResponse.js';
+import { COMPUTE_BUDGET_PROGRAM_ID, computeBudgetDecoder } from './builtin/computeBudget.js';
 import {
   SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID,
   splAssociatedTokenAccountDecoder,
@@ -294,16 +295,23 @@ const NO_BYTES = new Uint8Array(0);
 /**
  * The built-in decoders, keyed by the program each one is about (Req 4.2, 4.4).
  *
- * Module-level and shared: the three decoders are stateless singletons, so
- * rebuilding this map per registry would allocate for no gain. The program IDs
- * come from the decoders' own modules rather than being re-spelled here, so a
- * decoder and its registration cannot disagree about which address they cover —
- * the same discipline `resolve/errorResolver.ts` applies to its error tables.
+ * Module-level and shared: the decoders are stateless singletons, so rebuilding
+ * this map per registry would allocate for no gain. The program IDs come from
+ * the decoders' own modules rather than being re-spelled here, so a decoder and
+ * its registration cannot disagree about which address they cover — the same
+ * discipline `resolve/errorResolver.ts` applies to its error tables.
+ *
+ * Compute Budget joins the three of Requirement 4.4 because it is the most
+ * frequent program on the chain — nearly every transaction opens with two or
+ * three of its instructions — and without it those instructions reach the
+ * `Unknown` floor, which reads as a gap in the tool rather than as the absence
+ * of information it is meant to signal.
  */
 const BUILTIN_DECODERS: ReadonlyMap<Base58Address, InstructionDecoder> = new Map([
   [SYSTEM_PROGRAM_ID, systemProgramDecoder],
   [SPL_TOKEN_PROGRAM_ID, splTokenDecoder],
   [SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID, splAssociatedTokenAccountDecoder],
+  [COMPUTE_BUDGET_PROGRAM_ID, computeBudgetDecoder],
 ]);
 
 /** Shared by every registry built without an IDL store. */
