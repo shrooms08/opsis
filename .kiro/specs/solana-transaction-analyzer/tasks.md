@@ -802,19 +802,45 @@ a coverage table so each of the three is traceable to exactly one task.
   `confidence` marker is the one the case should produce, that every lamport and
   token amount is a decimal string with the right digits, and that no float
   appears anywhere. Then confirm the three phase-boundary facts: `cpiAttribution`
-  is `null`, since nested attribution stays in Phase 2; every **top-level**
-  instruction carries a real compute value while every **nested** instruction is
+  is `null`, since nested attribution stays in Phase 2; a **top-level**
+  instruction carries a compute value when its invocation emitted a
+  `consumed N of M compute units` line, and reports `available: false` with
+  `raw` confidence otherwise, while every **nested** instruction is
   `available: false` with `raw` confidence; and `LogReport.messages` matches
   `meta.logMessages` element for element in order, with the container confidence
   reading `full` when the logs are present and untruncated, `partial` when
   truncated, `raw` when absent.
 
-  Pinning the per-instruction compute value of every top-level instruction is
-  what turns a depth-1 misattribution into a test failure rather than a silent
-  ship, since a value shifted onto an adjacent instruction is plausible on screen
-  and detectable only against ground truth. Pinning the log array costs nothing,
-  because it is a straight copy, and makes any accidental filtering or reordering
-  fail immediately.
+  **An earlier revision of this group said every top-level instruction carries
+  a real compute value.** That was too strong, and the candidate files are right
+  where the text was wrong. Two kinds of top-level invocation emit no
+  `consumed` line, and both are the runtime's behaviour rather than a gap in
+  the tool. **Native programs** — Compute Budget, System Program — emit
+  `invoke [n]` and `success` with **no `consumed` line at all**, so there is
+  no evidence in the log stream to attribute, and reporting a number for them
+  would mean inventing one. **Instructions after the failing index never
+  executed**, so they emitted no scope at all; task 8.4's implementation
+  already separates that case under its own `never-executed` reason, which is
+  recorded there.
+
+  Here is the verification that settles which side is right, because without
+  it this reads as the tool excusing itself: **the unattributed remainder is
+  exactly 150 multiplied by the number of executed native top-level
+  instructions, in every one of the six fixtures — 300, 600, 300, 750, 450,
+  and 300 respectively.** 150 compute units is the fixed per-instruction
+  charge the runtime applies to native programs and never writes to the log.
+  So the missing values are accounted for exactly, and an implementation that
+  guessed would have had to invent precisely those multiples of 150. The
+  observed per-fixture counts of top-level instructions with no value are `01`
+  2 of 5, `02` 6 of 7, `03` 7 of 9, `04` 5 of 6, `06` 5 of 6, and `07` 4 of 5.
+
+  Pinning whatever per-instruction compute value each top-level instruction
+  has — including the absence, where `available: false` is itself the pinned
+  fact — is what turns a depth-1 misattribution into a test failure rather
+  than a silent ship, since a value shifted onto an adjacent instruction is
+  plausible on screen and detectable only against ground truth. Pinning the
+  log array costs nothing, because it is a straight copy, and makes any
+  accidental filtering or reordering fail immediately.
 
   All six recorded cases are pinned, so all six `expected.json` files belong to
   this group and no recorded directory is meant to stay `pending` after it. An
@@ -843,9 +869,13 @@ a coverage table so each of the three is traceable to exactly one task.
       consistent on every node, and no node elided at any depth. This is the
       success-path half of the tree-shape coverage; task 9.4 pins the same shape
       on a failing transaction
-    - Pin the verbatim log array with its container confidence, and the
-      per-instruction compute value of every top-level instruction against
-      `available: false` with `raw` confidence on every nested node
+    - Pin the verbatim log array with its container confidence, and whatever
+      per-instruction compute value each top-level instruction has — a value
+      where a `consumed` line attributed one, `available: false` with `raw`
+      confidence where none did — against `available: false` with `raw`
+      confidence on every nested node. Here 2 of the 5 top-level instructions
+      carry no value, and since nothing halted this run they are absent for the
+      native-program reason
     - _Requirements: 3.2, 3.3, 3.4, 4.4, 7.8, 8.1, 14.4, 21.1_
 
   - [ ] 9.2 Hand-review the v0 lookup-table half of the same `expected.json`
@@ -866,8 +896,9 @@ a coverage table so each of the three is traceable to exactly one task.
       task 9 into sub-tasks exists so a human reviews in chunks, and these are two
       genuinely different passes over one file; bolting the account list onto the
       end of the tree review is where an eye starts skimming
-    - The verbatim log array and the top-level compute values are pinned by task
-      9.1 on this same file, so nothing is asserted about them twice here
+    - The verbatim log array and the top-level compute values, present and absent
+      alike, are pinned by task 9.1 on this same file, so nothing is asserted
+      about them twice here
     - _Requirements: 7.5, 7.6, 7.7, 8.1, 14.4, 19.3, 21.1_
 
   - [ ] 9.3 Author `expected.json` for the four error-resolution cases
@@ -918,8 +949,12 @@ a coverage table so each of the three is traceable to exactly one task.
     - For all four, pin `failingInstructionIndex` naming the top-level index,
       `indexOutOfRange: false`, `failed: true` on exactly that node, and
       `cpiAttribution: null`
-    - Pin the verbatim log array and the top-level compute values for all four
-      cases. The log array is load-bearing in two directions here, which is part
+    - Pin the verbatim log array and, for all four cases, whatever compute value
+      each top-level instruction has — including `available: false` with `raw`
+      confidence where no `consumed` line attributed one, which is most of the
+      instructions on these four: `02` 6 of 7, `03` 7 of 9, `04` 5 of 6, and
+      `07` 4 of 5 carry no value. The log array is load-bearing in two
+      directions here, which is part
       of the reason these cases sit together: `02` resolves *out of* its log
       array, and `04` resolves the way it does precisely because of what its log
       array does **not** contain
@@ -939,9 +974,13 @@ a coverage table so each of the three is traceable to exactly one task.
       on **no nested node at any depth**, and `cpiAttribution: null`. Confirm by
       hand that the mark did not migrate to a child: a plausible-looking mark on a
       nested frame is exactly the guess the design forbids
-    - Pin the verbatim log array with its container confidence, and the
-      per-instruction compute value of every top-level instruction against
-      `available: false` with `raw` confidence on every nested node
+    - Pin the verbatim log array with its container confidence, and whatever
+      per-instruction compute value each top-level instruction has — a value
+      where a `consumed` line attributed one, `available: false` with `raw`
+      confidence where none did — against `available: false` with `raw`
+      confidence on every nested node. Here 5 of the 6 top-level instructions
+      carry no value, so the absence is the greater part of what this bullet
+      pins
     - Pin the resolved error as **`unresolved`, code 6001, reason
       `unattested-namespace`**: the code sits at or above the 6000 user-code floor,
       but the log array carries no `AnchorError` line and no IDL is loaded for the

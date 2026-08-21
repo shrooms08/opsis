@@ -522,7 +522,7 @@
       "order": 0,
       "parentOrder": null,
       "programId": "ComputeBudget111111111111111111111111111111",
-      "programName": null,
+      "programName": "Compute Budget",
       "valid": true
     },
     {
@@ -553,7 +553,7 @@
       "order": 1,
       "parentOrder": null,
       "programId": "ComputeBudget111111111111111111111111111111",
-      "programName": null,
+      "programName": "Compute Budget",
       "valid": true
     },
     {
@@ -1146,7 +1146,7 @@
       "order": 4,
       "parentOrder": null,
       "programId": "11111111111111111111111111111111",
-      "programName": null,
+      "programName": "System Program",
       "valid": true
     }
   ],

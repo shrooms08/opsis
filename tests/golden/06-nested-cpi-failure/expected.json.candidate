@@ -435,7 +435,7 @@
       "order": 0,
       "parentOrder": null,
       "programId": "ComputeBudget111111111111111111111111111111",
-      "programName": null,
+      "programName": "Compute Budget",
       "valid": true
     },
     {
@@ -466,7 +466,7 @@
       "order": 1,
       "parentOrder": null,
       "programId": "ComputeBudget111111111111111111111111111111",
-      "programName": null,
+      "programName": "Compute Budget",
       "valid": true
     },
     {
@@ -497,7 +497,7 @@
       "order": 2,
       "parentOrder": null,
       "programId": "ComputeBudget111111111111111111111111111111",
-      "programName": null,
+      "programName": "Compute Budget",
       "valid": true
     },
     {
@@ -1302,7 +1302,7 @@
               "order": 6,
               "parentOrder": 4,
               "programId": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
-              "programName": null,
+              "programName": "Token-2022",
               "valid": true
             },
             {
@@ -1394,7 +1394,7 @@
               "order": 7,
               "parentOrder": 4,
               "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-              "programName": null,
+              "programName": "SPL Token",
               "valid": true
             },
             {
@@ -1615,7 +1615,7 @@
       "order": 11,
       "parentOrder": null,
       "programId": "11111111111111111111111111111111",
-      "programName": null,
+      "programName": "System Program",
       "valid": true
     }
   ],

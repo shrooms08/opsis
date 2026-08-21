@@ -47,6 +47,7 @@ import type {
 } from '../model/analysis.js';
 import type { RawInnerInstructionGroup, RawInstruction, RawTransactionResponse } from '../model/rawResponse.js';
 import { resolveAccountRef, type EffectiveKeys } from './accountKeys.js';
+import { programNameFor } from './programNames.js';
 
 /**
  * `stackHeight` of a top-level instruction as the RPC reports it. All six
@@ -252,7 +253,12 @@ function createNode(
     depth,
     parentOrder,
     programId: program.programId,
-    programName: null,
+    // Display labelling only, and inert: nothing in decoder selection, error
+    // namespace selection, or confidence reads this field, which is what makes
+    // setting it here — before the registry runs — harmless. See the header of
+    // `programNames.ts`. `null` for any program not in that table, and for an
+    // unresolved program ID, which has no address to look up.
+    programName: programNameFor(program.programId),
     decode: pendingDecode(),
     // Req 3.1, 3.2: account indices, resolved through the single point of index
     // resolution so an out-of-range index becomes an `unresolved` ref.
