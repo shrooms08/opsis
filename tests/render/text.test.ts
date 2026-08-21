@@ -22,9 +22,14 @@
  *   surface.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { Analysis, TokenAmount } from '../../src/model/analysis.js';
+import { createIdlDecoder } from '../../src/decode/idl/idlDecoder.js';
+import { loadIdlDirectory, type LoadedIdl } from '../../src/decode/idl/idlStore.js';
+import type { AccountRef, Analysis, InstructionNode, TokenAmount } from '../../src/model/analysis.js';
 import type { RawTransactionResponse } from '../../src/model/rawResponse.js';
 import { analyzeTransaction } from '../../src/pipeline.js';
 import {
@@ -32,9 +37,11 @@ import {
   COLOR_CATEGORIES,
   createPalette,
   decideColorMode,
+  EMPTY_NAME_MARKER,
   ERROR_MARKER,
   FAIL_MARKER,
   SECTION_TITLES,
+  UNNAMED_MARKER,
   renderText,
   type ColorMode,
 } from '../../src/render/text.js';
@@ -666,6 +673,267 @@ describe('confidence markers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Name markers — no data-derived name renders as a blank
+// ---------------------------------------------------------------------------
+
+/**
+ * Every name the renderer reads off the `Analysis` carries a visible token, and
+ * the two absences are told apart.
+ *
+ * `<unnamed>` is Requirement 7.13's absence: an instruction with no applicable
+ * IDL entry keeps every `AccountRef.name` `null` while every address stays
+ * exactly as it was, so nothing failed and the word "unresolved" — which
+ * `instructionHeader` uses for a program index that could not be resolved to an
+ * address — would overstate it. `<empty name>` is the other fact: an artifact
+ * supplied a name and it was zero characters long.
+ *
+ * The reachability of the second is demonstrated rather than assumed, below,
+ * because it decides whether the instruction-header marker is real coverage or
+ * dead code.
+ */
+describe('name markers', () => {
+  /** The sample with the first resolved account ref of instruction #0 renamed. */
+  function withRefNamed(name: string | null): Analysis {
+    const analysis = sampleAnalysis();
+    const top = analysis.instructions[0];
+    if (top === undefined) throw new Error('the sample no longer carries an instruction');
+    const [first, ...rest] = top.accounts;
+    if (first === undefined || first.kind !== 'resolved') {
+      throw new Error('the sample no longer opens with a resolved account ref');
+    }
+    const renamed: AccountRef = { ...first, name };
+    return { ...analysis, instructions: [{ ...top, accounts: [renamed, ...rest] }] };
+  }
+
+  /** The sample with instruction #0's decoded name replaced. */
+  function withDecodeNamed(name: string): Analysis {
+    const analysis = sampleAnalysis();
+    const top = analysis.instructions[0];
+    if (top === undefined || top.decode.kind !== 'full') {
+      throw new Error('the sample no longer opens with a full decode');
+    }
+    return {
+      ...analysis,
+      instructions: [{ ...top, decode: { ...top.decode, name } }],
+    };
+  }
+
+  /** The sample with instruction #0 carrying exactly one decoded field. */
+  function withFieldNamed(name: string): Analysis {
+    const analysis = sampleAnalysis();
+    const top = analysis.instructions[0];
+    if (top === undefined || top.decode.kind !== 'full') {
+      throw new Error('the sample no longer opens with a full decode');
+    }
+    return {
+      ...analysis,
+      instructions: [
+        {
+          ...top,
+          decode: { ...top.decode, fields: [{ name, value: { type: 'bool', value: true } }] },
+          inner: [],
+        },
+      ],
+    };
+  }
+
+  /**
+   * Account ref #0 of instruction #0, whole.
+   *
+   * The role is a parameter because it is the one token that legitimately differs
+   * between the modes — uppercase stands in for the color (Req 12.6) — so a
+   * stripped color-on row is compared against the lowercase spelling.
+   */
+  function row(role: string, name: string): string {
+    return `      #0 ${role}  Acct1111111111111111111111111111111111111111  ${name}  [full]`;
+  }
+
+  it('marks an account the IDL could not name instead of ending the row early', () => {
+    const text = textOf(withRefNamed(null));
+
+    // The whole row, so the name column is pinned as present and the gaps as two
+    // spaces — the shape a blank made indistinguishable from a row that ended.
+    expect(text).toContain(row('WRITABLE SIGNER', UNNAMED_MARKER));
+  });
+
+  it('marks it identically with color on, so it substitutes for no color', () => {
+    const on = textOf(withRefNamed(null), 'on');
+
+    expect(on).toContain(UNNAMED_MARKER);
+    // The marker itself is never painted: strip the role color and the row is the
+    // color-off row, down to the lowercase role that color mode uses.
+    expect(stripAnsi(on)).toContain(row('writable signer', UNNAMED_MARKER));
+    expect(on).toContain(`  ${UNNAMED_MARKER}  `);
+  });
+
+  it('leaves a name the IDL did supply exactly as it was, in both modes', () => {
+    const off = textOf(withRefNamed('authority'));
+    const on = textOf(withRefNamed('authority'), 'on');
+
+    expect(off).toContain(row('WRITABLE SIGNER', 'authority'));
+    expect(stripAnsi(on)).toContain(row('writable signer', 'authority'));
+    // No marker is introduced where a real name exists.
+    expect(off).not.toContain(UNNAMED_MARKER);
+    expect(off).not.toContain(EMPTY_NAME_MARKER);
+  });
+
+  it('tells an empty name apart from an absent one', () => {
+    const empty = textOf(withRefNamed(''));
+
+    expect(empty).toContain(row('WRITABLE SIGNER', EMPTY_NAME_MARKER));
+    // The two facts are different and are not collapsed onto one marker.
+    expect(empty).not.toContain(UNNAMED_MARKER);
+    expect(EMPTY_NAME_MARKER).not.toBe(UNNAMED_MARKER);
+  });
+
+  it('does not borrow the word the header uses for a program that would not resolve', () => {
+    // `<unresolved program>` means a resolution failed, and the sample really does
+    // carry one — on an instruction header, where a program index went bad.
+    // Requirement 7.13's null name is not that: the address resolved and no IDL
+    // named it, so the account row must not reach for the same word.
+    const text = textOf(withRefNamed(null));
+    expect(text).toContain('<unresolved program>');
+
+    const accountRow = text.split('\n').find((line) => line.includes(UNNAMED_MARKER));
+    expect(accountRow).toBeDefined();
+    expect(accountRow).not.toContain('unresolved');
+    expect(UNNAMED_MARKER).not.toContain('unresolved');
+  });
+
+  it('marks an empty decoded instruction name in the header', () => {
+    const text = textOf(withDecodeNamed(''));
+
+    expect(text).toContain(`#0 System Program  ${EMPTY_NAME_MARKER}  decode [full]`);
+    // A real name is still rendered verbatim in the same position.
+    expect(textOf(withDecodeNamed('transfer'))).toContain('#0 System Program  transfer  decode [full]');
+  });
+
+  it('paints the header marker with the instruction-type color, like the name it stands for', () => {
+    const on = textOf(withDecodeNamed(''), 'on');
+
+    expect(on).toContain(createPalette('on').instructionType(EMPTY_NAME_MARKER));
+    // Which is still the same bytes once the color is stripped (Req 12.6/12.9).
+    expect(stripAnsi(on)).toContain(`${EMPTY_NAME_MARKER}  decode [full]`);
+  });
+
+  it('marks an empty decoded field name so the label column is never blank', () => {
+    const emptyLine = textOf(withFieldNamed('')).split('\n').find((line) => line.includes('true'));
+    const namedLine = textOf(withFieldNamed('flag')).split('\n').find((line) => line.includes('true'));
+
+    expect(emptyLine).toBeDefined();
+    expect(namedLine).toBeDefined();
+    // `<`, `>`, and a space are not regex metacharacters, so the marker is its
+    // own pattern.
+    expect(emptyLine).toMatch(new RegExp(`^ +${EMPTY_NAME_MARKER} +true$`));
+    // Same value column as a named field: the label is marked, not shifted.
+    expect(emptyLine?.indexOf('true')).toBe(namedLine?.indexOf('true'));
+  });
+
+  it('marks an empty account-entry name rather than ending the line in whitespace', () => {
+    const analysis = sampleAnalysis();
+    const entry = analysis.accountKeys[0];
+    expect(entry).toBeDefined();
+    if (entry === undefined) return;
+
+    const text = textOf({ ...analysis, accountKeys: [{ ...entry, name: '' }] });
+
+    const line = text.split('\n').find((candidate) => /^ {4}name/.test(candidate));
+    // The value is the marker and the line ends there: no padded-then-empty tail.
+    expect(line).toMatch(new RegExp(`^ {4}name {2,}${EMPTY_NAME_MARKER}$`));
+  });
+});
+
+/**
+ * The empty-name case is reachable, not defensive.
+ *
+ * `idlStore.ts` validates `instructions[].name` with `typeof name !== 'string'`,
+ * which accepts `""`, and `idlDecoder.ts` carries the value into
+ * `DecodeOutcome.name` verbatim — so a loaded IDL really does produce a `full`
+ * decode whose name is the empty string, which before this change rendered as
+ * nothing at all in the instruction header. Nothing is mocked and nothing is
+ * stubbed: the IDL is written to disk and read back through the real loader.
+ *
+ * Offline: one temporary directory, no network.
+ */
+describe('an empty IDL instruction name is reachable through the real loader', () => {
+  const address = 'Prog1111111111111111111111111111111111111111';
+  const discriminator = [1, 2, 3, 4, 5, 6, 7, 8];
+  let directory = '';
+
+  beforeAll(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'opsis-empty-name-'));
+    await writeFile(
+      join(directory, 'probe.json'),
+      JSON.stringify({
+        version: '0.1.0',
+        name: 'probe',
+        address,
+        instructions: [
+          {
+            name: '',
+            discriminator,
+            accounts: [{ name: '' }],
+            args: [{ name: '', type: 'u8' }],
+          },
+        ],
+      }),
+    );
+  });
+
+  afterAll(async () => {
+    if (directory !== '') await rm(directory, { recursive: true, force: true });
+  });
+
+  it('loads without a warning and decodes to a full outcome whose name is empty', async () => {
+    const store = await loadIdlDirectory(directory);
+    expect(store.warnings).toEqual([]);
+
+    const idl: LoadedIdl | undefined = store.get(address);
+    expect(idl).toBeDefined();
+    if (idl === undefined) return;
+    expect(idl.instructions[0]?.name).toBe('');
+
+    const outcome = createIdlDecoder(idl).decode(new Uint8Array([...discriminator, 42]), []);
+
+    expect(outcome.kind).toBe('full');
+    if (outcome.kind !== 'full') return;
+    // An empty instruction name and an empty argument name, both from the file.
+    expect(outcome.name).toBe('');
+    expect(outcome.fields[0]?.name).toBe('');
+  });
+
+  it('renders both of those as markers rather than as nothing', async () => {
+    const store = await loadIdlDirectory(directory);
+    const idl = store.get(address);
+    expect(idl).toBeDefined();
+    if (idl === undefined) return;
+    const outcome = createIdlDecoder(idl).decode(new Uint8Array([...discriminator, 42]), []);
+    if (outcome.kind !== 'full') throw new Error('the probe IDL no longer decodes fully');
+
+    const analysis = sampleAnalysis();
+    const top = analysis.instructions[0];
+    if (top === undefined) throw new Error('the sample no longer carries an instruction');
+    const node: InstructionNode = {
+      ...top,
+      decode: {
+        kind: 'full',
+        name: outcome.name,
+        source: 'anchor-idl',
+        fields: outcome.fields,
+        confidence: 'full',
+      },
+      inner: [],
+    };
+
+    const text = textOf({ ...analysis, instructions: [node] });
+
+    expect(text).toContain(`${EMPTY_NAME_MARKER}  decode [full]`);
+    // Twice: once for the instruction name, once for the argument name.
+    expect(text.split(EMPTY_NAME_MARKER)).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The failure path — Requirement 12.7
 // ---------------------------------------------------------------------------
 
@@ -805,8 +1073,35 @@ describe('over the recorded fixtures, through the real pipeline', () => {
         expect(text).toContain(`post ${solOf(balance.post)}`);
       }
     });
+
+    it(`marks every unnamed account of ${recorded.name} in both modes`, () => {
+      const analysis = analysisOf(recorded.document);
+
+      // No `--idl-dir` is in play for a recorded fixture, so Requirement 7.13
+      // holds for every ref: the address resolved and no IDL supplied a name.
+      const unnamed = countUnnamedRefs(analysis.instructions);
+      expect(unnamed).toBeGreaterThan(0);
+
+      for (const mode of ['off', 'on'] as const) {
+        const text = textOf(analysis, mode);
+        expect(text.split(UNNAMED_MARKER)).toHaveLength(unnamed + 1);
+        // Nothing here supplied an empty name, so the other marker stays absent.
+        expect(text).not.toContain(EMPTY_NAME_MARKER);
+      }
+    });
   }
 });
+
+/** Resolved refs with no IDL name, at every depth. */
+function countUnnamedRefs(nodes: readonly InstructionNode[]): number {
+  return nodes.reduce(
+    (total, node) =>
+      total +
+      node.accounts.filter((ref) => ref.kind === 'resolved' && ref.name === null).length +
+      countUnnamedRefs(node.inner),
+    0,
+  );
+}
 
 function countNodes(analysis: Analysis): number {
   const walk = (nodes: readonly Analysis['instructions'][number][]): number =>

@@ -62,9 +62,11 @@ import { analyzeTransaction } from '../../src/pipeline.js';
 import {
   COLOR_CATEGORIES,
   createPalette,
+  EMPTY_NAME_MARKER,
   ERROR_MARKER,
   FAIL_MARKER,
   SECTION_TITLES,
+  UNNAMED_MARKER,
   renderText,
   type ColorCategory,
   type ColorMode,
@@ -511,6 +513,33 @@ describe('the third text marker: uppercase account role labels', () => {
       const off = markersOf(textOf(analysis, 'off'));
       const on = markersOf(stripAnsi(textOf(analysis, 'on')));
 
+      expect(off.length).toBeGreaterThan(0);
+      expect(on).toEqual(off);
+    });
+  }
+
+  /**
+   * The same reading, for the two name markers.
+   *
+   * `<unnamed>` and `<empty name>` fill the slot where a name would go when the
+   * `Analysis` has none, and like a confidence marker they are emitted
+   * identically in both modes — so they are not a fourth Requirement 12.6 marker
+   * either. The instruction-header one is painted with the instruction-type color,
+   * whose 12.6 substitution is the identity, so stripping is enough to compare.
+   */
+  for (const { name, analysis } of CASES) {
+    it(`emits identical name markers in both modes for ${name}`, () => {
+      const pattern = new RegExp(
+        `${quoteRegex(UNNAMED_MARKER)}|${quoteRegex(EMPTY_NAME_MARKER)}`,
+        'g',
+      );
+      const markersOf = (text: string): readonly string[] =>
+        [...text.matchAll(pattern)].map((match) => match[0]);
+
+      const off = markersOf(textOf(analysis, 'off'));
+      const on = markersOf(stripAnsi(textOf(analysis, 'on')));
+
+      // Not vacuous: every case carries at least one account the IDL cannot name.
       expect(off.length).toBeGreaterThan(0);
       expect(on).toEqual(off);
     });

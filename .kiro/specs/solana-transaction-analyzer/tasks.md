@@ -169,6 +169,12 @@ requirement by requirement:
   type so `Analysis` does not churn between v1 and Phase 2 and every v1
   `expected.json` remains structurally valid afterward. Requirement 5.2's
   top-level attribution is unaffected: it comes from `meta.err`, not from logs.
+- **A diagnostic warning about an unconsumed instruction-data suffix is Phase 2**
+  (Requirement 11.3). The `partial` variant already carries the unconsumed bytes in
+  `undecodedData`, and no recorded fixture reaches that variant — the coverage-gap
+  subsection above records 11.3 as unpinned in v1 — so the warning would be code
+  with no case to test it against. It ships alongside the `09-partial-decode`
+  recording that would give it one.
 - **Three correctness properties get v1 test tasks**: numbers 25, 34, and 42,
   which is exactly the v1-essential set design.md now marks. The nine properties
   design.md carries an explicit Phase 2 marker on were previously in the v1 set and

@@ -273,6 +273,46 @@ export const ERROR_MARKER = '[ERROR]';
 /** Color-off role labels are uppercase (Req 12.6). This is that label for a ref. */
 const UNRESOLVED_ROLE = 'unresolved';
 
+/**
+ * A position no artifact supplied a name for.
+ *
+ * **Deliberately not `<unresolved …>`.** That word is already taken, by
+ * `instructionHeader`, for a program index that could not be resolved to an
+ * address — something genuinely failed there. Nothing failed here. Requirement
+ * 7.13 says an instruction with no applicable IDL entry keeps every name `null`
+ * *while every address stays exactly as it was*, so index resolution succeeded
+ * completely and there is simply no IDL to supply a name. Calling that
+ * "unresolved" would report a degradation that did not occur, which is the same
+ * dishonesty as the blank, pointing the other way. `<unnamed>` states the one
+ * thing that is true: this has no name.
+ *
+ * Emitted identically in both color modes, like the confidence markers and for
+ * the same reason: it substitutes for no color, so it is not one of the three
+ * Requirement 12.6 text markers.
+ */
+export const UNNAMED_MARKER = '<unnamed>';
+
+/**
+ * A name an artifact did supply, and left empty.
+ *
+ * A separate marker because it is a separate fact: `UNNAMED_MARKER` means nothing
+ * named this position, and this means something named it with zero characters.
+ * Collapsing the two would state the first where the second is true.
+ *
+ * Reachable rather than defensive. `idlStore.ts` validates every name it reads —
+ * `instructions[].name`, an instruction's account slot names, `args[].name` — with
+ * `typeof name !== 'string'`, which accepts `""`, and `idlDecoder.ts` carries the
+ * value through verbatim into `InstructionDecode.name`, `AccountRef.name`, and
+ * `DecodedField.name`. So an IDL declaring `"name": ""` produces a `full` decode
+ * whose name is the empty string, and before this marker existed it rendered as
+ * nothing at all in the most prominent position in the output.
+ *
+ * The precedent for marking rather than emitting nothing is `decodedValueText`'s
+ * `string` case, which quotes its value — an empty decoded string already reads
+ * as `""` and was never ambiguous.
+ */
+export const EMPTY_NAME_MARKER = '<empty name>';
+
 function identity(text: string): string {
   return text;
 }
@@ -497,6 +537,25 @@ function escapeControls(text: string): string {
     CONTROL_CHARACTERS,
     (character) => `\\x${character.charCodeAt(0).toString(16).padStart(2, '0')}`,
   );
+}
+
+/**
+ * A name read off the `Analysis`, which is never a blank.
+ *
+ * Every unresolved value in this output carries a visible marker, and a name is
+ * not an exception: a `null` name rendered as nothing was indistinguishable from
+ * a name that was the empty string, and both were indistinguishable from a line
+ * that simply ended. The two absences are distinct facts and get distinct
+ * markers — see `UNNAMED_MARKER` and `EMPTY_NAME_MARKER`.
+ *
+ * Takes `string | null` so the same call site serves an `AccountRef.name`, which
+ * is nullable, and an `InstructionDecode.name` or `DecodedField.name`, which are
+ * not; the `null` branch is then unreachable for the latter two by type, not by
+ * assumption.
+ */
+function nameToken(name: string | null): string {
+  if (name === null) return UNNAMED_MARKER;
+  return name === '' ? EMPTY_NAME_MARKER : escapeControls(name);
 }
 
 /**
@@ -809,7 +868,12 @@ function instructionHeader(node: InstructionNode, level: number, context: Contex
         ? escapeControls(node.programId)
         : '<unresolved program>';
 
-  const name = context.palette.instructionType(escapeControls(node.decode.name));
+  // Painted even when it is a marker: the instruction-type color is what tells a
+  // reader which slot they are looking at in color mode, and leaving the marker
+  // as the one unpainted token in that position would lose that. No fifth color
+  // is involved, so the Requirement 12.4 argument for uncolored confidence
+  // markers does not apply here.
+  const name = context.palette.instructionType(nameToken(node.decode.name));
 
   return `${indent(level)}${prefix}${token} ${program}${GAP}${name}${GAP}decode ${marker(node.decode.confidence)}${GAP}subtree ${marker(node.confidence)}`;
 }
@@ -838,8 +902,10 @@ function decodeLines(decode: InstructionDecode, level: number): readonly string[
 }
 
 function fieldLines(fields: readonly DecodedField[], level: number): readonly string[] {
+  // The label is the IDL's `args[].name`, so an empty one would leave the label
+  // column blank and the value floating in it with nothing to say why.
   return fields.map((entry) =>
-    field(level + 1, escapeControls(entry.name), decodedValueText(entry.value)),
+    field(level + 1, nameToken(entry.name), decodedValueText(entry.value)),
   );
 }
 
@@ -904,9 +970,10 @@ function accountRefLines(
       );
       continue;
     }
-    const name = ref.name === null ? '' : `${GAP}${escapeControls(ref.name)}`;
+    // Always a token, never a blank: the name column is present on every row, so
+    // an unnamed position reads as unnamed rather than as a row that ended early.
     lines.push(
-      `${indent(level + 1)}${indexToken(ref.index)} ${roleLabel(ref.role, ref.signer, context)}${GAP}${escapeControls(ref.address)}${name}${GAP}${marker(ref.confidence)}`,
+      `${indent(level + 1)}${indexToken(ref.index)} ${roleLabel(ref.role, ref.signer, context)}${GAP}${escapeControls(ref.address)}${GAP}${nameToken(ref.name)}${GAP}${marker(ref.confidence)}`,
     );
   }
   return lines;
@@ -957,7 +1024,11 @@ function accountsSection(analysis: Analysis, context: Context): readonly string[
     );
 
     if (entry !== undefined) {
-      if (entry.name !== null) lines.push(field(2, 'name', escapeControls(entry.name)));
+      // `null` omits the whole labelled row, which is this section's established
+      // shape for an absent optional row — as `program`, `invalid`, and `error`
+      // are elsewhere — and an absent row is not an ambiguous value. An empty
+      // string is: it would pad the label column and end the line in whitespace.
+      if (entry.name !== null) lines.push(field(2, 'name', nameToken(entry.name)));
       lines.push(field(2, 'origin', originText(entry.origin)));
       lines.push(field(2, 'referenced by', referencedByText(entry.referencedBy)));
     }
