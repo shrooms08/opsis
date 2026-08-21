@@ -70,7 +70,7 @@ further. That ratio is the product, not a limitation of it.
 
 ## Setup
 
-Requires Node.js **[CONFIRM: 20]** or later. No wallet, no API key, no funds.
+Requires Node.js 20 or later. No wallet, no API key, no funds.
 
 ```bash
 git clone https://github.com/shrooms08/opsis.git
@@ -346,6 +346,14 @@ Built with [Kiro](https://kiro.dev) for the Ready, Spec, Ship Hackathon.
 
 ## License
 
-**[CONFIRM: MIT]**
+MIT
 
 Built by Minos ([@shrooms08](https://github.com/shrooms08)).
+
+### A note on `npm audit`
+
+`npm audit` reports three moderate advisories reaching `uuid` transitively via
+`@solana/web3.js` and `jayson`. They sit in the RPC client's dependency tree, not
+in Opsis code, and `npm audit fix --force` would downgrade `@solana/web3.js`
+across a major version. Opsis makes at most one read-only HTTP request per run,
+and none at all when a local fixture exists.
