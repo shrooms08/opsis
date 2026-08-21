@@ -44,6 +44,7 @@ import { join } from 'node:path';
 
 import type { Base58Signature } from '../../src/model/analysis.js';
 import { analyzeTransaction } from '../../src/pipeline.js';
+import { canonicalJson, type JsonValue } from '../../src/render/json.js';
 import { FixtureSource } from '../../src/source/fixture.js';
 import type { TransactionSource } from '../../src/source/index.js';
 
@@ -200,10 +201,13 @@ export async function runFixture(root: string, name: string): Promise<GoldenResu
   // the real pipeline ---------------------------------------------------
   let actual: JsonValue;
   try {
-    actual = canonicalize(analyzeTransaction({ response: fetched.response }));
+    actual = canonicalJson(analyzeTransaction({ response: fetched.response }));
   } catch (cause) {
     // A pipeline throw is this fixture's failure rather than the suite's crash,
-    // so the remaining fixtures still report (Req 14.11).
+    // so the remaining fixtures still report (Req 14.11). `canonicalJson` throws
+    // a `JsonSerializationError` — an `Error` subclass whose message already
+    // names the failure and the JSON pointer — so `messageOf` reports it as this
+    // fixture's failure with no special case, the same as any pipeline throw.
     return fail(`${name}: the pipeline threw on ${inputPath}: ${messageOf(cause)}`);
   }
 
@@ -272,66 +276,53 @@ function messageOf(cause: unknown): string {
 // Canonical serialization
 // ---------------------------------------------------------------------------
 
-export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue };
+/**
+ * `JsonValue` is `src/render/json.ts`'s type, re-exported rather than redeclared.
+ *
+ * Re-exported because `./harness.test.ts` imports it from here and there is no
+ * reason to make that import move; one definition, two spellings of where to get
+ * it. A structurally identical local alias would have compiled just as well and
+ * would have been a second definition of the same thing.
+ */
+export type { JsonValue };
 
 /**
- * Sorted keys at every level, `undefined` values omitted, `null` preserved.
+ * **The stand-in is gone.** Until task 11.1 landed, this section held a local
+ * `canonicalize`: sorted keys at every level, `undefined` omitted, `null`
+ * preserved. Its comment said the shipped serializer would own that behaviour and
+ * that the migration would be a deletion, and that is what happened — the harness
+ * now calls `canonicalJson` from `src/render/json.ts`, so the shape a fixture pins
+ * and the shape `opsis --json` prints cannot drift apart. `tests/render/json.test.ts`
+ * checked the two agreed on a synthetic `Analysis` and on all six recorded
+ * fixtures before the deletion, so this is a substitution of equals on every value
+ * the harness feeds it.
  *
- * **This is a stand-in, and it is here rather than in `src/` on purpose.**
- * `src/render/json.ts` (task 11.1) owns the shipped canonical serializer; it
- * does not exist yet, and putting a second copy in `src/` now would leave two
- * definitions of "canonical" to drift apart. When 11.1 lands, this function is
- * deleted and the harness imports `canonicalJson`'s value form instead — no
- * other change here, since the comparison already runs over the canonical value
- * rather than over a string.
+ * The claim is recorded rather than erased because "why does the harness import a
+ * serializer from `src/`?" is a question worth an answer, and the answer is that
+ * it used to have its own and having two definitions of "canonical" was the
+ * hazard.
  *
- * Key order does not actually affect the comparison below, which walks keys by
- * name. Canonicalizing anyway keeps the harness comparing the same shape the
- * renderer will emit, so `expected.json` files authored against the renderer
- * (task 9) need no adjustment. Omitting `undefined` is the part that matters:
- * `exactOptionalPropertyTypes` lets an absent optional field be spelled either
- * way in TypeScript, and JSON has only one spelling.
+ * Two differences from the deleted stand-in, neither of which the harness has to
+ * handle specially:
+ *
+ * - `canonicalJson` throws a typed `JsonSerializationError` where the stand-in
+ *   threw a bare `TypeError`. Both are `Error`s, so `runFixture`'s `catch` and
+ *   `messageOf` report either as that fixture's failure.
+ * - Its guard is strictly wider: non-finite numbers, non-plain objects (a `Date`,
+ *   a `Map`, a class instance), and reference cycles are named with a JSON pointer
+ *   instead of silently becoming `null`, `{}`, or a stack overflow. Wider is the
+ *   direction a golden harness wants — every one of those would otherwise be
+ *   compared as a fabricated value.
+ *
+ * Key order still does not affect the comparison below, which walks keys by name.
+ * Canonicalizing anyway is what keeps `expected.json` files authored against the
+ * renderer comparable without adjustment.
+ *
+ * @deprecated Prefer `canonicalJson` from `src/render/json.js` directly. This
+ * alias exists because `./harness.test.ts` imports the old name; it is one
+ * binding, not a second implementation.
  */
-export function canonicalize(value: unknown): JsonValue {
-  if (value === null) return null;
-
-  switch (typeof value) {
-    case 'boolean':
-    case 'string':
-      return value;
-    case 'number':
-      return value;
-    case 'object':
-      break;
-    /* c8 ignore start -- `Analysis` holds no bigint, symbol, function, or undefined leaf. */
-    default:
-      throw new TypeError(`cannot canonicalize a value of type ${typeof value}`);
-    /* c8 ignore stop */
-  }
-
-  if (Array.isArray(value)) {
-    // `undefined` inside an array becomes `null`, as `JSON.stringify` does: an
-    // array has no way to omit an element without renumbering the rest.
-    return (value as readonly unknown[]).map((element) =>
-      element === undefined ? null : canonicalize(element),
-    );
-  }
-
-  const source = value as Readonly<Record<string, unknown>>;
-  const canonical: Record<string, JsonValue> = {};
-  for (const key of Object.keys(source).sort(byCodePoint)) {
-    const entry = source[key];
-    if (entry === undefined) continue;
-    canonical[key] = canonicalize(entry);
-  }
-  return canonical;
-}
+export { canonicalJson as canonicalize };
 
 // ---------------------------------------------------------------------------
 // Comparison
@@ -359,7 +350,8 @@ export interface Difference {
  * dropped field pass as a null one.
  *
  * Recursion is bounded by the document, which is finite and acyclic: `actual`
- * comes from `canonicalize` and `expected` from `JSON.parse`.
+ * comes from `canonicalJson`, which rejects a cycle rather than returning one,
+ * and `expected` from `JSON.parse`.
  */
 export function diffJson(actual: JsonValue, expected: JsonValue): readonly Difference[] {
   const differences: Difference[] = [];

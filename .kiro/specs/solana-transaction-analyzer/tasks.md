@@ -158,8 +158,12 @@ requirement by requirement:
   (Requirement 8.1, partially satisfied rather than deferred). Task 8.4 derives
   top-level values from the depth-1 `invoke [1]` scopes and reports every nested
   instruction as the `available: false` variant with `raw` confidence, naming the
-  Phase 2 per-line attribution deferral as the cause. The transaction total
-  (Req 8.5) comes from `meta.computeUnitsConsumed` and is unaffected.
+  Phase 2 per-line attribution deferral as the cause. A top-level instruction
+  whose invocation emitted no `consumed N of M compute units` line is
+  `available: false` with `raw` confidence as well, so shipping top-level
+  values is not the same as every top-level instruction carrying one; task 9's
+  group prose accounts for the absences. The transaction total (Req 8.5) comes
+  from `meta.computeUnitsConsumed` and is unaffected.
 - **Nested CPI failure attribution is not implemented** (Requirement 5.5).
   `FailureReport.cpiAttribution` is always `null` in v1. The field stays in the
   type so `Analysis` does not churn between v1 and Phase 2 and every v1
@@ -371,10 +375,15 @@ a coverage table so each of the three is traceable to exactly one task.
       to mark that top-level node rather than guess at a nested frame — a
       regression here appears only when children exist, so no other pinned case
       would catch it. It also pins the tree shape at depth, the verbatim log array,
-      and the per-instruction compute value of every top-level instruction. Its
-      log-derived nested attribution assertion at `partial` confidence remains
-      Phase 2 work on this same fixture and **needs no re-recording**, since the
-      recorded response already contains the `logMessages` that assertion will read
+      and whatever per-instruction compute value each top-level instruction
+      has — a value where a `consumed N of M compute units` line attributed
+      one, `available: false` with `raw` confidence where none did. Here 5 of
+      the 6 top-level instructions carry no value, so the absence is the
+      greater part of what it pins; task 9's group prose accounts for those
+      missing values. Its log-derived nested attribution assertion at `partial`
+      confidence remains Phase 2 work on this same fixture and **needs no
+      re-recording**, since the recorded response already contains the
+      `logMessages` that assertion will read
     - `07-unknown-program` — **pinned**, filter `'failed'`. Honest degradation:
       `Unknown`, `raw` confidence, hex payload preserved, run still exits normally.
       Its `Custom 7` is governed by no table either, so error resolution yields
@@ -998,9 +1007,9 @@ a coverage table so each of the three is traceable to exactly one task.
     second tier of recorded-but-unpinned cases exists.
     Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 11. Rendering and the process contract
+- [x] 11. Rendering and the process contract
 
-  - [ ] 11.1 Implement the canonical JSON serializer
+  - [x] 11.1 Implement the canonical JSON serializer
     - Create `src/render/json.ts` with `renderJson(analysis)`: keys sorted
       lexicographically at every level, keys whose value is `undefined` omitted,
       keys whose value is `null` preserved, UTF-8, no ANSI sequences, RFC 8259
@@ -1016,7 +1025,7 @@ a coverage table so each of the three is traceable to exactly one task.
       known shape
     - _Requirements: 9.2, 13.1, 13.2, 13.3, 13.4, 13.5, 13.6, 13.7, 13.8_
 
-  - [ ] 11.2 Implement fixed-point decimal formatting
+  - [x] 11.2 Implement fixed-point decimal formatting
     - Create `src/render/decimal.ts` with `formatFixedPoint`,
       `formatLamportsAsSol`, `formatTokenAmount`, and `groupThousands`
     - `formatFixedPoint` splits a decimal integer string into integer and
@@ -1033,7 +1042,7 @@ a coverage table so each of the three is traceable to exactly one task.
     - Use no locale-sensitive formatting, so output is invariant under `LANG`
     - _Requirements: 9.7, 12.5, 12.10, 12.11, 12.12, 12.13, 12.14_
 
-  - [ ] 11.3 Implement the text renderer
+  - [x] 11.3 Implement the text renderer
     - Create `src/render/text.ts` consuming `Analysis` and returning a string,
       with sections for transaction metadata, instruction tree, and account state
       separated by blank lines and two spaces of indentation per tree level
@@ -1050,9 +1059,13 @@ a coverage table so each of the three is traceable to exactly one task.
       needs a mint's `decimals` it must already be in `Analysis`, or it falls
       back to base units with `partial` confidence — it has nowhere else to look
     - Write a rendering-failure message to stderr for a malformed object
+    - Task 11.7, unfixed: `field()` pads labels `padEnd(LABEL_WIDTH)`, 21, so a
+      21-char label emits `maximumAmountInWithSlippageTolerance3` with no
+      separator. IDL names are unbounded, `raw_instruction_data` is 20; it is
+      pinned `it.fails` in `tests/render/text.layout.test.ts`, a regression test
     - _Requirements: 12.1, 12.2, 12.3, 12.4, 12.6, 12.7, 12.8, 12.9_
 
-  - [ ] 11.4 Implement exit codes and the stream policy
+  - [x] 11.4 Implement exit codes and the stream policy
     - Create `src/exit.ts` with `ExitCode`, `exitCodeFor(outcome)`, and
       `writeDiagnostic`
     - `0` when the analysis completed and the transaction succeeded on chain;
@@ -1071,7 +1084,7 @@ a coverage table so each of the three is traceable to exactly one task.
       errors, and error-path usage output, all to stderr
     - _Requirements: 12.7, 13.6, 22.1, 22.2, 22.3, 22.4, 22.5, 22.6_
 
-  - [ ] 11.5 Wire the CLI and the bin shim
+  - [x] 11.5 Wire the CLI and the bin shim
     - Create `src/cli.ts` with `CliOptions`, `parseArgv`, and `main(argv)`,
       owning the only `process.argv`, `process.stdout`, and `process.stderr`
       references in the codebase
@@ -1087,18 +1100,18 @@ a coverage table so each of the three is traceable to exactly one task.
     - Compose config → signature → source → pipeline → renderer → exit code
     - _Requirements: 1.4, 1.5, 16.7, 17.1, 17.2, 17.3, 17.4, 17.6, 17.7, 22.5, 22.6_
 
-  - [ ]* 11.6 Write unit tests for help and version output
+  - [x]* 11.6 Write unit tests for help and version output
     - A description for every registered flag, at least one example analyzing a
       signature, the version matching `package.json`, `--version` winning over
       `--help`, and an unrecognized flag naming itself on stderr with exit 2
     - _Requirements: 17.1, 17.2, 17.3, 17.4, 17.5, 17.7_
 
-  - [ ]* 11.7 Write unit tests for text layout, colors, and markers
+  - [x]* 11.7 Write unit tests for text layout, colors, and markers
     - Section layout with color off, pairwise distinctness of the four category
       colors, and the three text markers. These are what a property cannot state
     - _Requirements: 12.1, 12.3, 12.4, 12.6_
 
-- [ ] 12. Checkpoint — the CLI runs end to end
+- [x] 12. Checkpoint — the CLI runs end to end
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 13. Verification hardening
@@ -1136,7 +1149,7 @@ a coverage table so each of the three is traceable to exactly one task.
       spawn, no compile step, and no sleep anywhere in the suite
     - _Requirements: 14.1, 14.3, 14.5, 14.9, 14.10, 14.11_
 
-  - [ ] 13.2 Implement the read-only AST guard
+  - [x] 13.2 Implement the read-only AST guard
     - Create `tests/guard/readonly.test.ts` implementing **Property 34: No
       forbidden call site exists anywhere in the source** (v1-essential)
     - Parse every file under `src/` with the TypeScript compiler API — already
@@ -1166,7 +1179,7 @@ a coverage table so each of the three is traceable to exactly one task.
       `src/`
     - **Validates: Requirements 9.3, 9.5, 12.10, 12.12, 15.1, 15.2, 15.3, 15.4, 15.5, 15.6**
 
-  - [ ]* 13.7 Write property test for the golden comparator
+  - [x]* 13.7 Write property test for the golden comparator
     - **Property 42: The golden comparator is order-insensitive and value-exact**
       (v1-essential)
     - A comparator that ignores a leaf difference makes every golden test
@@ -1175,7 +1188,7 @@ a coverage table so each of the three is traceable to exactly one task.
       absent key
     - **Validates: Requirements 14.7**
 
-  - [ ]* 13.10 Write the remaining named unit tests
+  - [x]* 13.10 Write the remaining named unit tests
     - The empty token balance collection when both arrays are absent
     - The three-way log collection confidence: `full` when `logMessages` is
       present and untruncated, `partial` when truncated, `raw` when absent
@@ -1189,9 +1202,15 @@ a coverage table so each of the three is traceable to exactly one task.
       instruction
     - Harness meta-tests for fixture discovery, the two file-failure reports, the
       mismatch report content, and overall-failure propagation
+    - Unasserted finding in `src/resolve/logs.ts`: `classifyMarker`'s comment
+      claims leading zeros and absurd lengths alike open no scope, but only the
+      absurd-length half holds — `Program <id> invoke [01]` parses to depth 1
+      via `Number.parseInt` and opens a normal depth-1 scope. Harmless today —
+      no runtime line, no fixture — but it would inflate the depth-1 count task
+      8.4's alignment check depends on, and the comment claims the opposite
     - _Requirements: 8.2, 14.1, 14.3, 14.5, 14.8, 14.11, 20.9, 21.1, 21.5, 21.6_
 
-  - [ ]* 13.11 Add the property coverage table to the test suite
+  - [x]* 13.11 Add the property coverage table to the test suite
     - A single test asserting that each of the three v1 properties — numbers 25, 34,
       and 42 — has exactly one implementing test file, so none can be silently
       dropped. Each of the three carries a comment naming the property it
@@ -1202,6 +1221,12 @@ a coverage table so each of the three is traceable to exactly one task.
       nine deferred properties are not listed as missing, because they are Phase 2
       work rather than gaps in the v1 set; design.md remains the record of what they
       specify
+    - Not all three take a run count: 25 and 42 are `fast-check` properties at
+      100 runs minimum; 34 is a deterministic exhaustive walk over every `.ts`
+      file under `src/`, no run count by design, its header arguing the whole
+      finite domain is strictly stronger than sampling. The table carries a
+      `sampled | exhaustive` union, not a number; design.md's reviewer-path
+      claim of 100 iterations each is prose-inaccurate for 34, not a gap
     - _Requirements: 9.1_
 
 - [ ] 14. Final checkpoint — the reviewer path

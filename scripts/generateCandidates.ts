@@ -41,17 +41,29 @@
  * ## Running it
  *
  * Same story as `recordFixture.ts` — a TypeScript file with no runner in
- * `devDependencies`. Either:
+ * `devDependencies`. `tsx` is not installed, so this fetches it:
  *
  *   npx tsx scripts/generateCandidates.ts
  *
  * or, with nothing beyond what `npm install` already put in `node_modules`,
  * compile to a scratch directory with the installed compiler and run the output:
  *
- *   npx tsc scripts/generateCandidates.ts --outDir .candidates-out \
- *     --module nodenext --moduleResolution nodenext --target es2022 \
- *     --skipLibCheck --types node
+ *   npx tsc -p tsconfig.json --noEmit false --outDir .candidates-out \
+ *     --declaration false --sourceMap false
  *   node .candidates-out/scripts/generateCandidates.js
+ *   rm -rf .candidates-out
+ *
+ * The `-p` matters, and is not interchangeable with naming this file on the
+ * command line. Passing `tsc` a file path makes it ignore `tsconfig.json`
+ * outright — including `strict` and the extra checks layered on top of it — and
+ * the resulting unconfigured check reports around ten errors in `idlStore.ts`,
+ * `fixture.ts`, and `harness.ts` that do not exist under the project config,
+ * where `npx tsc --noEmit` is clean. Those errors are artefacts of the
+ * invocation, not of the code; emit succeeds anyway, so the generated JS is the
+ * same either way, but there is no way to tell that from the output. `-p` uses
+ * the project config and the three overrides above turn its repo-wide `noEmit`
+ * into a scratch-directory emit without a declaration or source-map step
+ * nothing here reads.
  *
  * Flags:
  *
